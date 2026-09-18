@@ -12,6 +12,8 @@
 // @grant        none
 // @downloadURL https://update.greasyfork.org/scripts/570049/MAX%20Blinder.user.js
 // @updateURL https://update.greasyfork.org/scripts/570049/MAX%20Blinder.meta.js
+// @homepageURL https://github.com/EchoForge91/MAX_Blinder
+// @supportURL  https://github.com/EchoForge91/MAX_Blinder/issues
 // ==/UserScript==
 
 (function() {
