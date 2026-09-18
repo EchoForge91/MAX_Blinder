@@ -1,6 +1,6 @@
 # MAX Blinder
 
-Ограничение телеметрии мессенджера MAX.
+Ограничение телеметрии web-версии мессенджера MAX.
 
 [![Установить через Greasy Fork](https://img.shields.io/badge/Установить-Greasy%20Fork-green?style=for-the-badge&logo=tampermonkey)](https://greasyfork.org/ru/scripts/570049-max-blinder)
 
