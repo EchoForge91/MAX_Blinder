@@ -4,8 +4,6 @@
 
 [![Установить через Greasy Fork](https://img.shields.io/badge/Установить-Greasy%20Fork-green?style=for-the-badge&logo=tampermonkey)](https://greasyfork.org/ru/scripts/570049-max-blinder)
 
-📂 Исходный код: [github.com/EchoForge91/MAX_Blinder](https://github.com/EchoForge91/MAX_Blinder)
-
 ---
 
 Мессенджер MAX периодически собирает и отправляет телеметрию о вашей активности, устройстве и сети. Скрипт пресекает эти попытки сбора данных и отслеживания, наглядно показывая количество блокировок.
