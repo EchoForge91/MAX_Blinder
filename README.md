@@ -1,5 +1,3 @@
-<img width="501" height="396" alt="02" src="https://github.com/user-attachments/assets/db9c1642-90df-4b53-92ac-813ea9b10976" />
-<img width="501" height="396" alt="01" src="https://github.com/user-attachments/assets/22d37d5c-3516-4567-9e8f-68d4c5f29adf" />
 # MAX Blinder
 
 Ограничение телеметрии web-версии мессенджера MAX.
@@ -40,6 +38,8 @@
 - Данные, доступные серверу напрямую.
 - Не шифрует сообщения.
 
+<img width="501" height="396" alt="02" src="https://github.com/user-attachments/assets/db9c1642-90df-4b53-92ac-813ea9b10976" />
+<img width="501" height="396" alt="01" src="https://github.com/user-attachments/assets/22d37d5c-3516-4567-9e8f-68d4c5f29adf" />
 ---
 
 ## 🚀 Как использовать
