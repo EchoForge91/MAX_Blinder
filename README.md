@@ -38,8 +38,6 @@
 - Данные, доступные серверу напрямую.
 - Не шифрует сообщения.
 
-<img width="501" height="396" alt="02" src="https://github.com/user-attachments/assets/db9c1642-90df-4b53-92ac-813ea9b10976" />
-<img width="501" height="396" alt="01" src="https://github.com/user-attachments/assets/22d37d5c-3516-4567-9e8f-68d4c5f29adf" />
 ---
 
 ## 🚀 Как использовать
@@ -64,6 +62,8 @@
 4. Запустите веб версию MAX в браузере с установленным скриптом MAX Blinder.
 5. Запустите сканер Qr-кода в эмулированной версии и отсканируйте его в браузере. После регистрации эмулированная версия будет не нужна.
 
+<img width="501" height="396" alt="01" src="https://github.com/user-attachments/assets/22d37d5c-3516-4567-9e8f-68d4c5f29adf" />
+<img width="501" height="396" alt="02" src="https://github.com/user-attachments/assets/db9c1642-90df-4b53-92ac-813ea9b10976" />
 ---
 
 <details>
