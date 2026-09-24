@@ -184,5 +184,6 @@ MIT
 
 Этот скрипт предоставляется «как есть». Автор не несет ответственности за возможные ограничения аккаунта со стороны платформы. Используйте для защиты личных данных и повышения анонимности.
 
+![Анимация работы скрипта](https://raw.githubusercontent.com/EchoForge91/MAX_Blinder/main/Demo.gif)
 <img width="501" height="396" alt="01" src="https://github.com/user-attachments/assets/22d37d5c-3516-4567-9e8f-68d4c5f29adf" />
 <img width="501" height="396" alt="02" src="https://github.com/user-attachments/assets/db9c1642-90df-4b53-92ac-813ea9b10976" />
