@@ -58,6 +58,8 @@ Userscript для ограничения телеметрии web-версии �
 6. После регистрации эмулятор больше не нужен.
 
 <details>
+<img width="544" height="470" alt="01" src="https://github.com/user-attachments/assets/ade7bbba-8c7a-48b8-93df-dd9b879ad45e" />
+
 <summary><strong>📖 ПОДРОБНОЕ ОПИСАНИЕ ФУНКЦИЙ И ЛОГОВ (развернуть) ▼</strong></summary>
 
 <br>
