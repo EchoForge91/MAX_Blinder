@@ -57,9 +57,9 @@ Userscript для ограничения телеметрии web-версии �
 5. Запустите сканер QR-кода в эмулированной версии и отсканируйте его в браузере.
 6. После регистрации эмулятор больше не нужен.
 
-<details>
-<img width="544" height="470" alt="01" src="https://github.com/user-attachments/assets/ade7bbba-8c7a-48b8-93df-dd9b879ad45e" />
+<img width="544" height="470" alt="01" src="https://github.com/user-attachments/assets/b2ff1dcc-a236-406e-8c72-7a4d69a57640" />
 
+<details>
 <summary><strong>📖 ПОДРОБНОЕ ОПИСАНИЕ ФУНКЦИЙ И ЛОГОВ (развернуть) ▼</strong></summary>
 
 <br>
