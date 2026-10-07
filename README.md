@@ -2,11 +2,10 @@
 
 [![Version](https://img.shields.io/badge/version-2.01-blue.svg)](https://github.com/EchoForge91/MAX_Blinder/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Greasy Fork](https://img.shields.io/badge/Greasy%20Fork-570049-green.svg)](https://greasyfork.org/ru/scripts/570049)
 
 Userscript для ограничения телеметрии web-версии мессенджера MAX.
 
-**[📥 Установить скрипт](https://greasyfork.org/ru/scripts/570049)** · **[📋 Все релизы](https://github.com/EchoForge91/MAX_Blinder/releases)** · **[💬 Обсуждение](https://github.com/EchoForge91/MAX_Blinder/issues)**
+**[📥 Установить скрипт](https://greasyfork.org/ru/scripts/570049)** 
 
 ---
 
