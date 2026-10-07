@@ -1,4 +1,3 @@
-<img width="544" height="470" alt="02" src="https://github.com/user-attachments/assets/daf5522b-352c-4ebe-b9fd-29a817e1fe9c" />
 # 🪬 MAX Blinder
 
 [![Version](https://img.shields.io/badge/version-2.01-blue.svg)](https://github.com/EchoForge91/MAX_Blinder/releases/latest)
