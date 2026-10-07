@@ -1,3 +1,4 @@
+<img width="544" height="470" alt="02" src="https://github.com/user-attachments/assets/daf5522b-352c-4ebe-b9fd-29a817e1fe9c" />
 # 🪬 MAX Blinder
 
 [![Version](https://img.shields.io/badge/version-2.01-blue.svg)](https://github.com/EchoForge91/MAX_Blinder/releases/latest)
@@ -58,6 +59,9 @@ Userscript для ограничения телеметрии web-версии �
 6. После регистрации эмулятор больше не нужен.
 
 <img width="544" height="470" alt="01" src="https://github.com/user-attachments/assets/b2ff1dcc-a236-406e-8c72-7a4d69a57640" />
+<img width="544" height="470" alt="02" src="https://github.com/user-attachments/assets/b1ffafa3-805b-4ff9-bab7-275daaa5e294" />
+<img width="960" height="536" alt="03" src="https://github.com/user-attachments/assets/7bd671bf-bf9e-49f9-a6d3-2ea43261cf32" />
+
 
 <details>
 <summary><strong>📖 ПОДРОБНОЕ ОПИСАНИЕ ФУНКЦИЙ И ЛОГОВ (развернуть) ▼</strong></summary>
