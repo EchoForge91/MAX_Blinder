@@ -59,7 +59,7 @@ Userscript для ограничения телеметрии web-версии �
 
 <img width="544" height="470" alt="01" src="https://github.com/user-attachments/assets/b2ff1dcc-a236-406e-8c72-7a4d69a57640" />
 <img width="544" height="470" alt="02" src="https://github.com/user-attachments/assets/b1ffafa3-805b-4ff9-bab7-275daaa5e294" />
-<img width="960" height="536" alt="03" src="https://github.com/user-attachments/assets/7bd671bf-bf9e-49f9-a6d3-2ea43261cf32" />
+<img width="576" height="322" alt="03" src="https://github.com/user-attachments/assets/7bd671bf-bf9e-49f9-a6d3-2ea43261cf32" />
 
 
 <details>
