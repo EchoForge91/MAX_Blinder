@@ -6,7 +6,7 @@
 
 Userscript для ограничения телеметрии web-версии мессенджера MAX.
 
-**[📥 Установить скрипт](https://github.com/EchoForge91/MAX_Blinder/raw/main/MAX_Blinder.user.js)** · **[📋 Все релизы](https://github.com/EchoForge91/MAX_Blinder/releases)** · **[🌐 Greasy Fork](https://greasyfork.org/ru/scripts/570049)**
+**[📥 Установить скрипт](https://github.com/EchoForge91/MAX_Blinder/raw/main/MAX_Blinder.user.js)** · 
 
 ---
 
