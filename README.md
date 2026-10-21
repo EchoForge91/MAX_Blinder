@@ -1,6 +1,6 @@
 # 🪬 MAX Blinder
 
-[![Version](https://img.shields.io/badge/version-2.01-blue.svg)](https://github.com/EchoForge91/MAX_Blinder/releases/latest)
+[![Version](https://img.shields.io/badge/version-2.02-blue.svg)](https://github.com/EchoForge91/MAX_Blinder/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Userscript для ограничения телеметрии web-версии мессенджера MAX.
@@ -20,16 +20,17 @@ Userscript для ограничения телеметрии web-версии �
 - Блокировка Firebase (Installations, Analytics, Crashlytics), Google Tag Manager, Google Identity Toolkit.
 - Блокировка проверки доступности сторонних сайтов (Telegram, WhatsApp, Госуслуги, Google, OK.ru, Yandex, Huawei Push) — одна из защит от определения VPN.
 - Блокировка регистрации Service Worker и удаление существующих.
-- Перехват телеметрийных Worker и SharedWorker — они заменяются на пустые заглушки, чтобы сайт не падал.
-- Защита от сбора технических данных об устройстве и браузере.
-- Снижение риска утечки IP через WebRTC и блокировка сервисов его определения.
-- Подмена параметров фингерпринта (Canvas, Audio, WebGL, Client Rects, measureText, шрифты, батарея, User-Agent Client Hints).
+- Перехват телеметрийных Worker и SharedWorker, а также блокировка создания подозрительных WebSocket-соединений.
+- Защита от сбора технических данных об устройстве и браузере (включая защиту от обнаружения подмены API).
+- Снижение риска утечки IP через WebRTC и блокировку сервисов его определения.
+- Подмена параметров фингерпринта (Canvas, Audio, WebGL, Client Rects, measureText, батарея, User-Agent Client Hints).
 - Детерминированный генератор шума (Mulberry32) — отпечаток стабилен в рамках сессии и не выдаёт себя нестабильностью.
 - Маскировка типа соединения (type = wifi, effectiveType = 4g, downlinkMax = 100, saveData = false) — скрывает мобильную сеть и оператора.
 - Фильтрация WebSocket (блокировка телеметрического opcode 5 и события HOST_REACHABILITY по любому opcode).
 - Мониторинг чтения буфера обмена и проверок разрешений (`navigator.permissions.query`).
+- **Отключение всех звуков мессенджера** (галочка «Без звука»).
+- **Интерактивный интерфейс:** окно можно перетаскивать, менять его высоту, а при развороте оно автоматически выбирает правильное направление (в зависимости от ближайшего угла экрана).
 - Устойчивость к cross-origin (try/catch в iframe и popup) — скрипт не падает на сторонних фреймах.
-- Интерфейс с живым отображением блокировок и понятными названиями сервисов.
 
 ## 🚫 Скрипт не может скрывать
 
@@ -44,7 +45,7 @@ Userscript для ограничения телеметрии web-версии �
 2. Установите данный скрипт (ссылка в шапке README).
 3. В правом нижнем углу появится компактный индикатор 🪬 BLINDER.
 4. Нажмите на него, чтобы развернуть лог заблокированных запросов.
-5. Кнопка **Copy log** позволит скопировать историю блокировок (с датой и версией скрипта) для анализа.
+5. В меню (☰) доступна кнопка **«Сохранить лог»**, которая скачивает историю блокировок в `.txt` файл (с указанием даты и версии скрипта).
 
 ## 📱 Регистрация в MAX без смартфона
 
@@ -57,11 +58,9 @@ Userscript для ограничения телеметрии web-версии �
 5. Запустите сканер QR-кода в эмулированной версии и отсканируйте его в браузере.
 6. После регистрации эмулятор больше не нужен.
 
-<img width="326" height="282" alt="01" src="https://github.com/user-attachments/assets/b2ff1dcc-a236-406e-8c72-7a4d69a57640" />
-&nbsp;&nbsp;
-<img width="326" height="282" alt="02" src="https://github.com/user-attachments/assets/b1ffafa3-805b-4ff9-bab7-275daaa5e294" />
-<img width="576" height="322" alt="03" src="https://github.com/user-attachments/assets/7bd671bf-bf9e-49f9-a6d3-2ea43261cf32" />
-
+<img width="515" height="363" alt="001" src="https://github.com/user-attachments/assets/1a181ea0-5e34-446a-822c-6a314e98fbeb" />
+<img width="515" height="363" alt="002" src="https://github.com/user-attachments/assets/cb049267-00e4-4bd3-a129-787f41d84135" />
+<img width="576" height="324" alt="003" src="https://github.com/user-attachments/assets/094731e5-847e-498f-97fb-491c7337c3c9" />
 
 <details>
 <summary><strong>📖 ПОДРОБНОЕ ОПИСАНИЕ ФУНКЦИЙ И ЛОГОВ (развернуть) ▼</strong></summary>
@@ -69,45 +68,45 @@ Userscript для ограничения телеметрии web-версии �
 <br>
 
 - **Перехват и блокировка сетевых запросов** – скрипт перехватывает fetch, XMLHttpRequest, Beacon API и WebSocket, блокируя отправку данных на трекеры (Apptracer, Vigo, Logalyzer и др.).
-- **Анализ тела POST-запросов** – проверка содержимого fetch и XHR на телеметрические ключевые слова (`events`, `host_reachability`, `telemetry`, `metrics`, `analytics`, `crash`, `perf`, `permission`, `permission_status`, `ptype`, `pstatus`). Поддерживаются string, URLSearchParams, FormData, Blob, ArrayBuffer.
+- **Анализ тела POST-запросов** – проверка содержимого fetch и XHR на строгие JSON-ключи телеметрии (например, `"events":`). Поддерживаются string, URLSearchParams, FormData, Blob, ArrayBuffer.
 - **Точный чёрный список** – разделён на домены (`BLOCK_DOMAINS`) и пути (`BLOCK_PATHS`). Это устраняет ложные срабатывания коротких подстрок вроде `crash`, `metrics`, `analytics`, которые раньше могли случайно заблокировать легитимные запросы мессенджера.
 - **Блокировка Firebase и Google-инфраструктуры** – запросы к `firebaseinstallations.googleapis.com`, `firebase-settings.crashlytics.com`, `app-measurement.com`, `firebase.googleapis.com`, `googletagmanager.com`, `googleapis.com/identitytoolkit`, `crashlytics.com`.
-- **Блокировка API MAX** – запросы к `api.oneme.ru`, куда уходит событие HOST_REACHABILITY.
 - **Фильтрация WebSocket** – блокировка пакетов с opcode 5 (событие GET_HOST_REACHABILITY) и любых пакетов с событием HOST_REACHABILITY **по любому opcode**. Список опкодов намеренно сужен до `[5]` — остальные (2, 22, 31, 103, 161) оказались функциональными или неизвестными, их блокировка ломала конфиг, звонки и жалобы.
+- **Блокировка создания WebSocket** – перехват конструктора `new WebSocket(url)`. Телеметрические сокеты не открываются, а сайт получает заглушку с событием `onclose`.
 - **Блокировка Service Worker** – удаление существующих и запрет новых регистраций SW, чтобы исключить перехват запросов в обход fetch/XHR.
 - **Перехват Worker и SharedWorker** – телеметрийные воркеры (`telemetry`, `analytics`, `metrics`, `apptracer`, `vigo`, `oneme`, `firebase`, `crashlytics`, `gtm`, `googletagmanager`) заменяются на пустую заглушку через Blob. Сайт не падает, но данные не уходят.
-- **Защита от iframe-обхода** – перехват создания iframe и новых окон, блокировка попыток отправки телеметрии через изолированные контексты. Устойчиво к cross-origin (try/catch).
-- **Canvas Fingerprinting** – детерминированный микро-шум в getImageData (по всем байтам, а не только первому). Шум кэшируется через WeakMap: один холст — один отпечаток.
+- **Защита от iframe-обхода** – перехват создания iframe и новых окон (включая динамически добавляемые через `MutationObserver`), блокировка попыток отправки телеметрии через изолированные контексты. Устойчиво к cross-origin (try/catch).
+- **Canvas Fingerprinting** – детерминированный микро-шум в getImageData (по всем байтам). Защищены также методы toDataURL и toBlob (с восстановлением чистых пикселей, чтобы не портить холсты). Шум кэшируется через WeakMap: один холст — один отпечаток.
 - **Audio Fingerprinting** – подмена AudioBuffer.getChannelData с усиленным микро-шумом (amplitude 0.00005) и защита OfflineAudioContext. Seed привязан к длине буфера и каналу, шум кэшируется.
-- **Client Rects** – микро-шум в getBoundingClientRect и getClientRects (±0.0001). Сохранена согласованность: `x + width = right`, `y + height = bottom`.
+- **Client Rects** – микро-шум в getBoundingClientRect и getClientRects (±0.0001). Возвращаются настоящие объекты DOMRect и DOMRectList.
 - **measureText** – вынесен в отдельную опцию `PROTECT_MEASURETEXT`. Шум детерминированный (по хэшу текста), подменяются width, actualBoundingBoxLeft/Right/Ascent/Descent, fontBoundingBoxAscent/Descent.
-- **WebRTC Hardening** – перехват addIceCandidate и принудительный relay-режим (`iceTransportPolicy: 'relay'`). Опция `WEBRTC_STRICT` (по умолчанию false) сохраняет iceServers — это позволяет звонкам работать даже в строгих сетях (CGNAT, корпоративный firewall). При `WEBRTC_STRICT: true` iceServers очищаются для максимальной защиты от IP-утечек.
-- **Детерминированный PRNG (Mulberry32)** – общий для Canvas, Audio, Client Rects и measureText. Seed хранится в sessionStorage (или задаётся числом через `FINGERPRINT_SEED`). Раньше случайный шум при каждом вызове сам становился отпечатком из-за нестабильности — теперь отпечаток стабилен в рамках сессии.
+- **WebRTC Hardening** – принудительный relay-режим (`iceTransportPolicy: 'relay'`). Опция `WEBRTC_STRICT` (по умолчанию false) сохраняет iceServers — это позволяет звонкам работать даже в строгих сетях (CGNAT, корпоративный firewall). При `WEBRTC_STRICT: true` заглушка addIceCandidate блокирует P2P-соединения для максимальной защиты от IP-утечек.
+- **Детерминированный PRNG (Mulberry32)** – общий для Canvas, Audio, Client Rects и measureText. Сид (seed) генерируется на лету на основе характеристик браузера, не хранится на диске и не может быть прочитан страницей.
 - **Тайминги** – `performance.now()` получает статический offset на сессию (дельта монотонна, не детектируется). Шум из `Date.now()` убран, чтобы не ломать таймеры мессенджера (heartbeat, expiration, синхронизация).
 - **Подмена аппаратных характеристик** – hardwareConcurrency (8 ядер), deviceMemory (8 ГБ).
 - **Сокрытие типа соединения** – подмена `navigator.connection`: type = wifi, effectiveType = 4g, downlink = 10, downlinkMax = 100, rtt = 50, saveData = false, onchange = null. Скрывает мобильную сеть и код оператора.
-- **Подмена шрифтов** – `document.fonts.query` возвращает стандартный набор шрифтов.
 - **Подмена Battery API** – `navigator.getBattery` всегда возвращает 100% заряда.
 - **Подмена плагинов** – `navigator.plugins` и `navigator.mimeTypes` заменяются на стандартный набор.
 - **Скрытие автоматизации** – удаление флага `navigator.webdriver`.
-- **Маскировка нативных функций** – подмена toString перехваченных функций, чтобы они выглядели как нативный код.
+- **Маскировка нативных функций** – подмена toString и length перехваченных функций, чтобы они выглядели как нативный код (защита от анти-детекта).
 - **Подмена User-Agent Client Hints (UACH)** – маскировка архитектуры, платформы и версии браузера.
 - **Защита WebGL** – подмена Unmasked Vendor/Renderer, VENDOR, RENDERER, VERSION, SHADING_LANGUAGE_VERSION, а также лимитов (MAX_TEXTURE_SIZE, MAX_RENDERBUFFER_SIZE, MAX_VIEWPORT_DIMS, MAX_VERTEX_ATTRIBS, MAX_*_UNIFORM_VECTORS и др.).
 - **Защита от зондирования (Anti-Probing)** – блокировка запросов к `t.me`, `telegram.org`, `whatsapp.com`, `gosuslugi.ru`, `main.telegram.org`, `mmg.whatsapp.net`, `gstatic.com`, `calls.okcdn.ru`, `mtalk.google.com`, `ipv4-internet.yandex.net`, `ipv6-internet.yandex.net`, `pushtrs.push.hicloud.com`, `pushtrs1.push.hicloud.com`, `token-drcn.push.dbankcloud.com` (используются для определения VPN).
-- **Расширенный чёрный список** – домены и IP телеметрии (`stats.max.ru`, `telemetry.max.ru`, `collect.max.ru`, `log-api.max.ru`, `error-report.max.ru`, `notify-stat.max.ru`, `vk.com/rkn`, `sphere.avantelecom.ru`, `trace-flow.ru`, `appsflyer.com`, `api.oneme.ru`, Firebase Installations, Crashlytics, Google Tag Manager, а также IP `155.212.204.143`, `155.212.204.78`, `155.212.204.193`, `95.161.225.253`).
+- **Расширенный чёрный список** – домены и IP телеметрии (`stats.max.ru`, `telemetry.max.ru`, `collect.max.ru`, `log-api.max.ru`, `error-report.max.ru`, `notify-stat.max.ru`, `vk.com/rkn`, `sphere.avantelecom.ru`, `trace-flow.ru`, `appsflyer.com`, Firebase Installations, Crashlytics, Google Tag Manager, а также IP `155.212.204.143`, `155.212.204.78`, `155.212.204.193`, `95.161.225.253`).
+- **Отключение звуков** – перехват HTMLMediaElement.play и Web Audio API (AudioContext).
 - **Мониторинг разрешений и буфера** – логирование `navigator.permissions.query` (запросы доступа к камере, микрофону, геолокации, уведомлениям, буферу) и `navigator.clipboard.readText` / `.read`. Мониторинг не увеличивает счётчик блокировок.
-- **Понятные логи** – технические теги и домены переводятся в понятные фразы («Сбор крашей», «Проверка Telegram», «Заблокирована аналитика»). В логе разделены: интерфейсная строка (без URL) и полная строка (с URL) — для Copy log.
-- **Защита от утечки через Copy log** – из логов убран query string (в нём могут быть токены). В шапку копируемого лога добавляются версия скрипта и дата.
+- **Понятные логи** – технические теги и домены переводятся в понятные фразы («Сбор крашей», «Проверка Telegram», «Заблокирована аналитика»). В логе разделены: интерфейсная строка (без URL) и полная строка (с URL) — для Сохранения лога.
+- **Защита от утечки через сохранение лога** – из логов убран query string (в нём могут быть токены). В шапку файла добавляются версия скрипта и дата.
 - **Ограничение истории** – `MAX_LOG_HISTORY = 5000` записей. Кэш дедупликации чистится каждые 10 секунд. Скрипт не течёт по памяти при долгой работе.
 
 #### Расшифровка записей в логе
 
 | Тип | Описание | Когда возникает |
 | :--- | :--- | :--- |
-| **Запрос (FETCH)** | Блокировка обычного fetch-запроса | Запрос к домену из чёрного списка |
-| **Запрос (XHR)** | Блокировка XMLHttpRequest | Запрос к домену из чёрного списка |
+| **Запрос (FETCH/XHR)** | Блокировка обычного запроса | Запрос к домену из чёрного списка |
 | **Телеметрия (POST-TELE)** | Блокировка POST-запроса с телеметрией | Запрос содержит в теле ключевые слова: `events`, `host_reachability`, `telemetry`, `metrics`, `analytics`, `crash`, `perf`, `permission`, `permission_status`, `ptype`, `pstatus` |
 | **Скрытая передача (WS-TELE)** | Блокировка WebSocket-сообщения | Сообщение содержит opcode 5 (GET_HOST_REACHABILITY) или событие HOST_REACHABILITY по любому opcode |
+| **Соединение (WEBSOCKET)** | Блокировка создания WebSocket | Попытка подключиться к домену из чёрного списка |
 | **Маячок (BEACON)** | Блокировка Beacon API | Отправка данных через `navigator.sendBeacon` к домену из чёрного списка |
 | **Проверка сети (PROBE)** | Блокировка «зондирования» (проверка доступности сторонних сайтов) | Запрос к `t.me`, `telegram.org`, `whatsapp.com`, `gosuslugi.ru`, `yandex.net`, `hicloud.com`, `dbankcloud.com`, `mtalk.google.com`, `calls.okcdn.ru` и др. (используется для определения VPN) |
 | **Фоновый перехватчик (SW)** | Блокировка или удаление Service Worker | Попытка регистрации SW или очистка существующих при старте |
