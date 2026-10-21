@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MAX Blinder
 // @namespace    http://tampermonkey.net/
-// @version      2.01
+// @version      2.02
 // @description  Ограничение телеметрии web-версии мессенджера MAX (Макс)
 // @author       Echo91
 // @match        https://*.max.ru/*
@@ -38,11 +38,9 @@
         PROTECT_CANVAS: true,
         PROTECT_AUDIO: true,
         HIDE_WEBDRIVER: true,
-        HIDE_CONNECTION: true,
         FAKE_PLUGINS: true,
         FIXED_SCREEN: false,
         LOG_SERVICE_WORKER: true,
-        FAKE_FONTS: true,
         FAKE_BATTERY: true,
         FAKE_TIMEZONE: false,
         FAKE_LANGUAGE: false,
@@ -53,7 +51,8 @@
         INSPECT_POST_PAYLOAD: true,
         TIMING_NOISE: true,
         CLEAR_STORAGE_ON_START: false,
-        TELEMETRY_KEYWORDS: ['events', 'host_reachability', 'telemetry', 'metrics', 'analytics', 'crash', 'perf', 'permission', 'permission_status', 'ptype', 'pstatus'],
+        TELEMETRY_KEYWORDS: ['"events":', '"host_reachability":', '"telemetry":', '"metrics":', '"analytics":', '"crash":', '"perf":', '"permission":', '"permission_status":', '"ptype":', '"pstatus":'],
+        STORAGE_KEYWORDS: ['events', 'host_reachability', 'telemetry', 'metrics', 'analytics', 'crash', 'perf_'],
         FAKE_USER_AGENT_DATA: false,
         PROTECT_WEBGL: true,
         BLOCK_CACHE_STORAGE: false,
@@ -69,25 +68,27 @@
         AUDIO_NOISE_AMPLITUDE: 0.00005,      // увеличено с 0.000005
         PROTECT_OFFLINE_AUDIO: true,         // защита OfflineAudioContext
         HIDE_NETWORK_TYPE_DETAILS: true,     // маскировка типа сети и кода оператора
-        BLOCK_VPN_DETECTION: true            // маскировка флага VPN в HOST_REACHABILITY
+        BLOCK_VPN_DETECTION: true,           // маскировка флага VPN в HOST_REACHABILITY
+        MUTE_SOUNDS: false                   // Отключить все звуки мессенджера
     };
 
+    // Загружаем сохраненные настройки из localStorage
+    try {
+        CONFIG.MUTE_SOUNDS = localStorage.getItem('pm_mute_sounds') === 'true';
+    } catch (e) {
+        console.warn('Не удалось загрузить настройки из localStorage', e);
+    }
     // ========================== ДЕТЕРМИНИРОВАННЫЙ PRNG ==========================
-    // Генерирует стабильный шум для одного и того же зерна.
-    // Это критично для anti-fingerprinting: случайный шум при каждом вызове
-    // сам по себе становится отпечатком (нестабильность = уникальность).
+    // Генерируем сид на основе стабильных параметров браузера (не использует хранилища)
     const FINGERPRINT_SEED = (() => {
         if (CONFIG.FINGERPRINT_SEED !== null) return CONFIG.FINGERPRINT_SEED;
-        try {
-            let seed = sessionStorage.getItem('__pm_seed');
-            if (!seed) {
-                seed = String(Math.floor(Math.random() * 0xFFFFFFFF));
-                sessionStorage.setItem('__pm_seed', seed);
-            }
-            return parseInt(seed, 10) || 1234567;
-        } catch (e) {
-            return 1234567;
+        let str = navigator.userAgent + navigator.language + screen.width + 'x' + screen.height + navigator.hardwareConcurrency;
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash) + str.charCodeAt(i);
+            hash |= 0;
         }
+        return Math.abs(hash) || 1234567;
     })();
 
     // Mulberry32 — быстрый и качественный PRNG
@@ -105,8 +106,8 @@
     // ========================== ПЕРЕМЕННЫЕ ==========================
     let blockedCount = 0;
     let fullLogHistory = [];
-    const maxLogs = 20;
-    const MAX_LOG_HISTORY = 5000;   // ограничение истории, чтобы не течь памяти
+    const maxLogs = 40;
+    const MAX_LOG_HISTORY = 5000;
     let pendingLogs = [];
     let uiShadow = null;
 
@@ -147,7 +148,6 @@
         'crashlytics.com',
         'googletagmanager.com',
         // Прочее
-        'api.oneme.ru',
         'trace-flow.ru',
         // IP-адреса трекеров
         '155.212.204.143', '155.212.204.78', '155.212.204.193', '95.161.225.253'
@@ -262,6 +262,7 @@
 
     // Понятные названия для тегов блокировки
     const FRIENDLY_LABELS = {
+        'WEBSOCKET': 'Соединение',
         'FETCH': 'Запрос',
         'XHR': 'Запрос',
         'POST-TELE': 'Телеметрия',
@@ -279,7 +280,8 @@
         'GOOGLE': 'Сервисы Google',
         'FETCH (iframe)': 'Запрос из вставки',
         'XHR (iframe)': 'Запрос из вставки',
-        'FETCH (popup)': 'Запрос из окна'
+        'FETCH (popup)': 'Запрос из окна',
+        'STATUS': 'Статус' // <-- НОВОЕ
     };
 
     // Понятные названия для сервисов (по домену)
@@ -320,15 +322,6 @@
         { pattern: 'checkip.amazonaws.com', label: 'Определение IP' }
     ];
 
-    // Понятные сообщения для WebSocket / Service Worker
-    const FRIENDLY_MESSAGES = {
-        'opcode 5 blocked': 'Заблокирована аналитика',
-        'GET_HOST_REACHABILITY blocked': 'Заблокирована проверка сети',
-        'HOST_REACHABILITY (any opcode) blocked': 'Заблокирована проверка сети',
-        'чтение буфера обмена': 'Мессенджер читает буфер обмена',
-        'чтение содержимого буфера': 'Мессенджер читает данные из буфера'
-    };
-
     // Функции перевода
     function getFriendlyLabel(type) {
         return FRIENDLY_LABELS[type] || type;
@@ -340,10 +333,6 @@
             if (sUrl.includes(svc.pattern)) return svc.label;
         }
         return null;
-    }
-
-    function getFriendlyMessage(msg) {
-        return FRIENDLY_MESSAGES[msg] || msg;
     }
 
     const makeNative = (obj, prop) => {
@@ -360,23 +349,67 @@
     // ========================== ЛОГИРОВАНИЕ ==========================
     function addEntryToLog(container, data) {
         const entry = document.createElement('div');
-        entry.style.cssText = 'border-bottom: 1px solid rgba(255,255,255,0.1); padding: 4px 0; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 9px;';
+        entry.className = 'pm-log-entry';
         const friendlyType = getFriendlyLabel(data.type);
         const fullText = `[${friendlyType}] ${data.uiText}`;
-        entry.innerHTML = `<span style="color: #67b3ff;">[${friendlyType}]</span> ${data.uiText}`;
-        container.prepend(entry);
+        const typeSpan = document.createElement('span');
+        typeSpan.style.color = '#67b3ff';
+        typeSpan.textContent = `[${friendlyType}]`;
+        entry.appendChild(typeSpan);
+        entry.appendChild(document.createTextNode(' ' + data.uiText));
 
-        // Проверяем, обрезается ли текст, только после вставки в DOM
+        // 1. Вставляем элемент в DOM
+        container.prepend(entry);
+        // НОВОЕ: Автоматически прокручиваем список в самый верх
+        container.scrollTop = 0;
+
+        // 2. Узнаем итоговую высоту элемента (с учетом паддингов и рамок из CSS)
+        const finalHeight = entry.offsetHeight;
+
+        // 3. Если контейнер видим, запускаем анимацию
+        if (finalHeight > 0) {
+            const anim = entry.animate([
+                {
+                    maxHeight: '0px',
+                    paddingTop: '0px',
+                    paddingBottom: '0px',
+                    opacity: 0,
+                    borderBottomWidth: '0px'
+                },
+                {
+                    maxHeight: finalHeight + 'px',
+                    paddingTop: '5px',
+                    paddingBottom: '5px',
+                    opacity: 1,
+                    borderBottomWidth: '1px'
+                }
+            ], {
+                duration: 300, // Длительность анимации (0.3 сек)
+                easing: 'ease-out'
+            });
+
+            // Когда анимация закончится, убираем ограничение maxHeight
+            anim.onfinish = () => {
+                entry.style.maxHeight = '';
+                if (container.childNodes.length > maxLogs) {
+                    container.removeChild(container.lastChild);
+                }
+            };
+        } else {
+            // Если окно свернуто (высота 0), просто удаляем старые записи
+            if (container.childNodes.length > maxLogs) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
+        // 4. Проверяем, обрезается ли текст (для всплывающей подсказки)
         requestAnimationFrame(() => {
             if (entry.scrollWidth > entry.clientWidth) {
-                entry.title = fullText;
+                entry.setAttribute('data-tooltip', fullText);
                 entry.style.cursor = 'help';
             }
         });
-
-        if (container.childNodes.length > maxLogs) container.removeChild(container.lastChild);
     }
-
     function logBlock(type, url, description) {
         const key = `${type}|${url}`;
         const now = Date.now();
@@ -418,12 +451,12 @@
             const counterExpanded = uiShadow.getElementById('pm-counter-expanded');
             const logContainer = uiShadow.getElementById('pm-log-list');
 
-            requestAnimationFrame(() => {
-                // Обновляем оба счётчика
-                if (counter) counter.innerText = blockedCount;
-                if (counterExpanded) counterExpanded.innerText = blockedCount;
+        requestAnimationFrame(() => {
+            // Обновляем оба счётчика
+            if (counter) counter.innerText = blockedCount;
+            if (counterExpanded) counterExpanded.innerText = blockedCount;
 
-                // Запускаем анимацию иконки в том же кадре
+                // Запускаем анимацию иконки...
                 if (icon) {
                     try {
                         icon.animate([
@@ -486,6 +519,36 @@
     }
 
     // ========================== НОВЫЕ ЗАЩИТЫ ==========================
+    // ========================== ОТКЛЮЧЕНИЕ ЗВУКОВ ==========================
+    if (CONFIG.MUTE_SOUNDS) {
+        // Блокируем стандартный HTML5 Audio
+        const origPlay = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function() {
+            if (this.tagName === 'AUDIO' || this.tagName === 'VIDEO') {
+                return Promise.resolve(); // Делаем вид, что звук играет, но глушим его
+            }
+            return origPlay.apply(this, arguments);
+        };
+        makeNative(HTMLMediaElement.prototype, 'play');
+
+        // Блокируем Web Audio API (используется для звонков)
+        if (window.AudioContext) {
+            const origCreateOscillator = AudioContext.prototype.createOscillator;
+            AudioContext.prototype.createOscillator = function() {
+                const osc = origCreateOscillator.apply(this, arguments);
+                osc.start = function() {}; // Запрещаем гудки
+                return osc;
+            };
+            makeNative(AudioContext.prototype, 'createOscillator');
+            const origCreateBufferSource = AudioContext.prototype.createBufferSource;
+            AudioContext.prototype.createBufferSource = function() {
+                const source = origCreateBufferSource.apply(this, arguments);
+                source.start = function() {}; // Запрещаем мелодии
+                return source;
+            };
+            makeNative(AudioContext.prototype, 'createBufferSource');
+        }
+    }
 
     // 1. User-Agent Client Hints
     if (CONFIG.FAKE_USER_AGENT_DATA && navigator.userAgentData) {
@@ -515,54 +578,54 @@
 
     // 2. WebGL Fingerprinting
     if (CONFIG.PROTECT_WEBGL && window.WebGLRenderingContext) {
-        const protectWebGL = (ctx) => {
-            if (!ctx || !ctx.getParameter) return;
-            const originalGetParameter = ctx.getParameter;
-            ctx.getParameter = function(param) {
+        const patchGetParameter = (proto) => {
+            if (!proto || !proto.getParameter) return;
+            const originalGetParameter = proto.getParameter;
+            const customGetParameter = function(param) {
                 switch (param) {
-                    // Unmasked vendor / renderer (WebGL 1 и 2)
                     case 0x9245: return 'Google Inc. (NVIDIA)';
                     case 0x9246: return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-                    // VENDOR / RENDERER / VERSION / SHADING_LANGUAGE_VERSION
-                    case 0x1F00: return 'WebKit';                    // VENDOR
-                    case 0x1F01: return 'WebKit WebGL';              // RENDERER
-                    case 0x1F02: return 'WebGL 1.0 (OpenGL ES 2.0 Chromium)'; // VERSION
-                    case 0x8B8C: return 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)'; // SHADING_LANGUAGE_VERSION
-                    // Лимиты, согласованные с RTX 3060
-                    case 0x0D33: return 16384;  // MAX_TEXTURE_SIZE
-                    case 0x8D57: return 16384;  // MAX_RENDERBUFFER_SIZE
-                    case 0x0D3A: return new Int32Array([16384, 16384]); // MAX_VIEWPORT_DIMS
-                    case 0x8869: return 16;     // MAX_VERTEX_ATTRIBS
-                    case 0x8DFB: return 4096;   // MAX_VERTEX_UNIFORM_VECTORS
-                    case 0x8DFD: return 4096;   // MAX_FRAGMENT_UNIFORM_VECTORS
-                    case 0x8DFC: return 30;     // MAX_VARYING_VECTORS
-                    case 0x846E: return new Float32Array([1, 64]); // ALIASED_LINE_WIDTH_RANGE
+                    case 0x1F00: return 'WebKit';
+                    case 0x1F01: return 'WebKit WebGL';
+                    case 0x1F02: return 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
+                    case 0x8B8C: return 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)';
+                    case 0x0D33: return 16384;
+                    case 0x8D57: return 16384;
+                    case 0x0D3A: return new Int32Array([16384, 16384]);
+                    case 0x8869: return 16;
+                    case 0x8DFB: return 4096;
+                    case 0x8DFD: return 4096;
+                    case 0x8DFC: return 30;
+                    case 0x846E: return new Float32Array([1, 64]);
                 }
-                return originalGetParameter.call(this, param);
+                return originalGetParameter.apply(this, arguments);
             };
+            Object.defineProperty(customGetParameter, 'length', { value: originalGetParameter.length });
+            proto.getParameter = customGetParameter;
+            makeNative(proto, 'getParameter');
         };
-        const origGetContext = HTMLCanvasElement.prototype.getContext;
-        HTMLCanvasElement.prototype.getContext = function(type, attributes) {
-            const ctx = origGetContext.call(this, type, attributes);
-            if (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') {
-                protectWebGL(ctx);
-            }
-            return ctx;
-        };
-        makeNative(HTMLCanvasElement.prototype, 'getContext');
-    }
 
+        patchGetParameter(WebGLRenderingContext.prototype);
+        if (window.WebGL2RenderingContext) {
+            patchGetParameter(WebGL2RenderingContext.prototype);
+        }
+    }
     // 3. Блокировка Cache Storage API (опционально)
-    if (CONFIG.BLOCK_CACHE_STORAGE && window.caches) {
-        const origOpen = caches.open;
-        caches.open = function(name) {
-            if (CONFIG.TELEMETRY_KEYWORDS.some(k => name.toLowerCase().includes(k))) {
-                logBlock('CACHE', name, 'Заблокирован доступ к кэшу');
-                return Promise.reject(new Error('Cache blocked by Blinder'));
-            }
-            return origOpen.apply(this, arguments);
-        };
-        makeNative(caches, 'open');
+    if (CONFIG.BLOCK_CACHE_STORAGE && window.CacheStorage) {
+        const origOpen = CacheStorage.prototype.open;
+        if (origOpen) {
+            const customOpen = function(name) {
+                    if (CONFIG.STORAGE_KEYWORDS.some(k => String(name).toLowerCase().includes(k))) {
+                    logBlock('CACHE', name, 'Заблокирован доступ к кэшу');
+                    return Promise.reject(new Error('Cache blocked by Blinder'));
+                }
+                return origOpen.apply(this, arguments);
+            };
+            Object.defineProperty(customOpen, 'length', { value: origOpen.length });
+            CacheStorage.prototype.open = customOpen;
+            makeNative(CacheStorage.prototype, 'open');
+            try { delete caches.open; } catch(e) {}
+        }
     }
 
     // 4. Шум в координатах мыши (опционально)
@@ -593,12 +656,13 @@
                 const sUrl = String(scriptURL).toLowerCase();
                 if (workerPatterns.some(p => sUrl.includes(p))) {
                     logBlock('WORKER', scriptURL, 'Заблокирован фоновый процесс');
-                    // Возвращаем пустой воркер-заглушку
                     const blob = new Blob(['self.onmessage=function(){};'], { type: 'application/javascript' });
                     return new origWorker(URL.createObjectURL(blob), options);
                 }
                 return new origWorker(scriptURL, options);
             };
+            // Выравниваем длину для обычного Worker
+            Object.defineProperty(window.Worker, 'length', { value: origWorker.length });
             window.Worker.prototype = origWorker.prototype;
             makeNative(window, 'Worker');
         }
@@ -614,6 +678,7 @@
                 }
                 return new origSharedWorker(scriptURL, options);
             };
+            Object.defineProperty(window.SharedWorker, 'length', { value: origSharedWorker.length });
             window.SharedWorker.prototype = origSharedWorker.prototype;
             makeNative(window, 'SharedWorker');
         }
@@ -637,13 +702,6 @@
         }
     }
 
-    // 5d. [1.9] Безопасная маскировка VPN (не ломает WebRTC-звонки)
-    if (CONFIG.BLOCK_VPN_DETECTION && window.RTCPeerConnection) {
-        // Ничего не делаем — основной BLOCK_WEBRTC уже отключает ICE-серверы
-        // и не даёт собрать реальные IP-адреса через addIceCandidate.
-        // Дополнительная обёртка ломает звонки в мессенджере.
-    }
-
     if (CONFIG.BLOCK_PROBING) {
         // Перехват fetch
         const origFetch = window.fetch;
@@ -655,6 +713,7 @@
             }
             return origFetch.apply(this, arguments);
         };
+        Object.defineProperty(window.fetch, 'length', { value: 1 });
         makeNative(window, 'fetch');
 
         // Перехват XHR для probing (дополнительно)
@@ -664,17 +723,19 @@
             this._isProbe = shouldBlockProbing(url);
             return origOpen.apply(this, arguments);
         };
+        Object.defineProperty(XMLHttpRequest.prototype.open, 'length', { value: origOpen.length });
         const origSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.send = function(body) {
             if (this._isProbe) {
                 logBlock('PROBE', this._url);
                 // Имитируем ошибку сети, чтобы сайт не ждал ответа
                 setTimeout(() => {
-                    Object.defineProperty(this, 'readyState', { value: 4 });
-                    Object.defineProperty(this, 'status', { value: 0 });
-                    Object.defineProperty(this, 'statusText', { value: 'Network error' });
-                    this.dispatchEvent(new Event('error'));
+                    Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+                    Object.defineProperty(this, 'status', { value: 0, configurable: true });
+                    Object.defineProperty(this, 'statusText', { value: 'Network error', configurable: true });
                     this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new Event('error'));
+                    this.dispatchEvent(new Event('loadend'));
                 }, 1);
                 return;
             }
@@ -712,7 +773,7 @@
                 const keysToClear = [];
                 for (let i = 0; i < localStorage.length; i++) {
                     const key = localStorage.key(i);
-                    if (key && CONFIG.TELEMETRY_KEYWORDS.some(k => key.toLowerCase().includes(k))) {
+                    if (key && CONFIG.STORAGE_KEYWORDS.some(k => key.toLowerCase().includes(k))) {
                         keysToClear.push(key);
                     }
                 }
@@ -722,7 +783,7 @@
             if (window.indexedDB) {
                 indexedDB.databases().then(dbs => {
                     dbs.forEach(db => {
-                        if (db.name && CONFIG.TELEMETRY_KEYWORDS.some(k => db.name.toLowerCase().includes(k))) {
+                        if (db.name && CONFIG.STORAGE_KEYWORDS.some(k => db.name.toLowerCase().includes(k))) {
                             indexedDB.deleteDatabase(db.name);
                             logBlock('IDB', db.name, 'Удалена база данных');
                         }
@@ -773,7 +834,7 @@
 
             return origFetch2.apply(this, arguments);
         };
-
+        Object.defineProperty(window.fetch, 'length', { value: 1 });
         makeNative(window, 'fetch');
         // XHR (аналогично)
         const origOpenXHR = XMLHttpRequest.prototype.open;
@@ -784,6 +845,7 @@
             this._isProbe = CONFIG.BLOCK_PROBING && shouldBlockProbing(url);
             return origOpenXHR.apply(this, arguments);
         };
+        Object.defineProperty(XMLHttpRequest.prototype.open, 'length', { value: origOpenXHR.length });
         makeNative(XMLHttpRequest.prototype, 'open');
 
         const origSendXHR = XMLHttpRequest.prototype.send;
@@ -791,33 +853,46 @@
             if (this._isTracker) {
                 logBlock('XHR', this._url);
                 setTimeout(() => {
-                    Object.defineProperty(this, 'readyState', { value: 4 });
-                    Object.defineProperty(this, 'status', { value: 200 });
-                    Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}' });
-                    this.dispatchEvent(new Event('load'));
+                    Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+                    Object.defineProperty(this, 'status', { value: 200, configurable: true });
+                    if (this.responseType === 'json') {
+                        Object.defineProperty(this, 'response', { value: { status: "ok" }, configurable: true });
+                    } else {
+                        Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}', configurable: true });
+                        Object.defineProperty(this, 'response', { value: '{"status":"ok"}', configurable: true });
+                    }
                     this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new Event('load'));
+                    this.dispatchEvent(new Event('loadend'));
                 }, 1);
                 return;
             }
             if (this._isProbe) {
                 logBlock('PROBE', this._url);
                 setTimeout(() => {
-                    Object.defineProperty(this, 'readyState', { value: 4 });
-                    Object.defineProperty(this, 'status', { value: 0 });
-                    Object.defineProperty(this, 'statusText', { value: 'Network error' });
-                    this.dispatchEvent(new Event('error'));
+                    Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+                    Object.defineProperty(this, 'status', { value: 0, configurable: true });
+                    Object.defineProperty(this, 'statusText', { value: 'Network error', configurable: true });
                     this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new Event('error'));
+                    this.dispatchEvent(new Event('loadend'));
                 }, 1);
                 return;
             }
             if (this._method === 'POST' && body && hasTelemetryInPayload(body)) {
                 logBlock('POST-TELE', this._url);
                 setTimeout(() => {
-                    Object.defineProperty(this, 'readyState', { value: 4 });
-                    Object.defineProperty(this, 'status', { value: 200 });
-                    Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}' });
-                    this.dispatchEvent(new Event('load'));
+                    Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+                    Object.defineProperty(this, 'status', { value: 200, configurable: true });
+                    if (this.responseType === 'json') {
+                        Object.defineProperty(this, 'response', { value: { status: "ok" }, configurable: true });
+                    } else {
+                        Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}', configurable: true });
+                        Object.defineProperty(this, 'response', { value: '{"status":"ok"}', configurable: true });
+                    }
                     this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new Event('load'));
+                    this.dispatchEvent(new Event('loadend'));
                 }, 1);
                 return;
             }
@@ -826,97 +901,158 @@
         makeNative(XMLHttpRequest.prototype, 'send');
     }
 
-    // ========================== WEBSOCKET ФИЛЬТРАЦИЯ (с новыми опкодами) ==========================
-    if (CONFIG.BLOCK_WEBSOCKET_OPCODE5) {
-        const origWSSend = WebSocket.prototype.send;
-        WebSocket.prototype.send = function(data) {
-            if (typeof data === 'string' && data.includes('"opcode"')) {
-                try {
-                    const msg = JSON.parse(data);
-                    const opcode = msg.opcode;
-                    if (CONFIG.BLOCKED_OPCODES.includes(opcode)) {
-                        logBlock('WS-TELE', '', 'Заблокирована аналитика');
-                        return;
-                    }
-                    // Дополнительная проверка на GET_HOST_REACHABILITY (для opcode 5)
-                    if (opcode === 5 &&
-                        msg.payload &&
-                        msg.payload.events &&
-                        Array.isArray(msg.payload.events) &&
-                        msg.payload.events.some(e => e.event === 'GET_HOST_REACHABILITY')) {
-                        logBlock('WS-TELE', '', 'Заблокирована проверка сети');
-                        return;
-                    }
-                    // [1.9] Расширенная проверка HOST_REACHABILITY по любому opcode
-                    if (msg.payload &&
-                        msg.payload.events &&
-                        Array.isArray(msg.payload.events) &&
-                        msg.payload.events.some(e => e.event && e.event.includes('HOST_REACHABILITY'))) {
-                        logBlock('WS-TELE', '', 'Заблокирована проверка сети');
-                        return;
-                    }
-                } catch (e) {}
-            }
-            return origWSSend.apply(this, arguments);
-        };
-        makeNative(WebSocket.prototype, 'send');
-    }
-
-    // ========================== BEACON ==========================
-    if (CONFIG.BLOCK_BEACON) {
-        const origBeacon = navigator.sendBeacon;
-        navigator.sendBeacon = function(url, data) {
+    // ========================== WEBSOCKET ФИЛЬТРАЦИЯ ==========================
+    // Перехват конструктора WebSocket
+    const OrigWebSocket = window.WebSocket;
+    window.WebSocket = new Proxy(OrigWebSocket, {
+        construct(target, args) {
+            const url = args[0];
             if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
-                logBlock('BEACON', url);
-                return true;
+                logBlock('WEBSOCKET', url, 'Заблокировано соединение');
+                // Создаем полноценную заглушку
+                const stub = {
+                    binaryType: 'blob',
+                    bufferedAmount: 0,
+                    extensions: '',
+                    protocol: '',
+                    send: function() {},
+                    close: function() {},
+                    addEventListener: function() {},
+                    removeEventListener: function() {},
+                    dispatchEvent: function() { return true; },
+                    readyState: 3, // CLOSED
+                    url: url,
+                    onopen: null,
+                    onmessage: null,
+                    onerror: null,
+                    onclose: null
+                };
+                // Асинхронно уведомляем приложение, что соединение разорвано
+                setTimeout(() => {
+                    try {
+                        if (typeof stub.onerror === 'function') stub.onerror(new Event('error'));
+                        if (typeof stub.onclose === 'function') stub.onclose(new CloseEvent('close', { code: 1006 }));
+                    } catch (e) {}
+                }, 0);
+                return stub;
             }
-            return origBeacon.call(this, url, data);
-        };
-        makeNative(navigator, 'sendBeacon');
+            return new target(...args);
+        }
+    });
+    makeNative(window, 'WebSocket');
+    const origWSSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function(data) {
+        if (typeof data === 'string' && data.includes('"opcode"')) {
+            try {
+                const msg = JSON.parse(data);
+                const opcode = msg.opcode;
+
+                // Перехват и скрытие статусов (работает всегда, если включены галочки)
+                if (CONFIG.HIDE_READ_RECEIPTS && opcode === 50) {
+                    logEvent('STATUS', '', 'Скрыт статус "Прочитано"');
+                    return;
+                }
+                if (CONFIG.HIDE_TYPING && opcode === 65) {
+                    logEvent('STATUS', '', 'Скрыт статус "Печатает"');
+                    return;
+                }
+
+                // Существующая блокировка телеметрии (теперь внутри проверки)
+                if (CONFIG.BLOCK_WEBSOCKET_OPCODE5 && CONFIG.BLOCKED_OPCODES.includes(opcode)) {
+                    logBlock('WS-TELE', '', 'Заблокирована аналитика');
+                    return;
+                }
+                // Дополнительная проверка на GET_HOST_REACHABILITY
+                if (CONFIG.BLOCK_WEBSOCKET_OPCODE5 && opcode === 5 &&
+                    msg.payload &&
+                    msg.payload.events &&
+                    Array.isArray(msg.payload.events) &&
+                    msg.payload.events.some(e => e.event === 'GET_HOST_REACHABILITY')) {
+                    logBlock('WS-TELE', '', 'Заблокирована проверка сети');
+                    return;
+                }
+                // [1.9] Расширенная проверка HOST_REACHABILITY по любому опкоду
+                if (CONFIG.BLOCK_WEBSOCKET_OPCODE5 &&
+                    msg.payload &&
+                    msg.payload.events &&
+                    Array.isArray(msg.payload.events) &&
+                    msg.payload.events.some(e => e.event && e.event.includes('HOST_REACHABILITY'))) {
+                    logBlock('WS-TELE', '', 'Заблокирована проверка сети');
+                    return;
+                }
+            } catch (e) {}
+        }
+        return origWSSend.apply(this, arguments);
+    };
+    makeNative(WebSocket.prototype, 'send');
+    // ========================== BEACON ==========================
+    if (CONFIG.BLOCK_BEACON && window.Navigator) {
+        const origBeacon = Navigator.prototype.sendBeacon;
+        if (origBeacon) {
+            const customBeacon = function(url, data) {
+                if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
+                    logBlock('BEACON', url);
+                    return true;
+                }
+                return origBeacon.apply(this, arguments);
+            };
+            // Скрываем длину функции (нативный sendBeacon имеет length = 2, наш тоже, но на всякий случай)
+            Object.defineProperty(customBeacon, 'length', { value: origBeacon.length });
+            Navigator.prototype.sendBeacon = customBeacon;
+            makeNative(Navigator.prototype, 'sendBeacon');
+            // Удаляем собственное свойство, если оно было
+            try { delete navigator.sendBeacon; } catch(e) {}
+        }
     }
 
     // ========================== IFRAME ЗАЩИТА ==========================
     if (CONFIG.IFRAME_PROTECTION) {
         const origCreateElement = document.createElement;
         const origOpen = window.open;
-        const origAttachShadow = Element.prototype.attachShadow;
 
         function protectIframe(iframe) {
             try {
                 if (!iframe.contentWindow) return;
                 const win = iframe.contentWindow;
                 if (CONFIG.BLOCK_FETCH_XHR) {
-                win.fetch = new Proxy(win.fetch, {
-                    apply(target, thisArg, args) {
-                        const url = typeof args[0] === 'object' ? args[0].url : args[0];
-                        if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
-                            logBlock('FETCH (iframe)', url);
-                            return Promise.resolve(new Response('{"status":"ok"}', { status: 200 }));
+                    win.fetch = new Proxy(win.fetch, {
+                        apply(target, thisArg, args) {
+                            const url = typeof args[0] === 'object' ? args[0].url : args[0];
+                            if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
+                                logBlock('FETCH (iframe)', url);
+                                return Promise.resolve(new Response('{"status":"ok"}', { status: 200 }));
+                            }
+                            return Reflect.apply(target, thisArg, args);
                         }
-                        return Reflect.apply(target, thisArg, args);
-                    }
-                });
-                const origIOpen = win.XMLHttpRequest.prototype.open;
-                win.XMLHttpRequest.prototype.open = function(method, url) {
-                    this._isTracker = shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url));
-                    this._blockUrl = url;
-                    return origIOpen.apply(this, arguments);
-                };
-                const origISend = win.XMLHttpRequest.prototype.send;
-                win.XMLHttpRequest.prototype.send = function() {
-                    if (this._isTracker) {
-                        logBlock('XHR (iframe)', this._blockUrl);
-                        setTimeout(() => {
-                            Object.defineProperty(this, 'readyState', { value: 4 });
-                            Object.defineProperty(this, 'status', { value: 200 });
-                            Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}' });
-                            this.dispatchEvent(new Event('load'));
-                            this.dispatchEvent(new Event('readystatechange'));
-                        }, 1);
-                        return;
-                    }
-                    return origISend.apply(this, arguments);
-                };
+                    });
+                    const origIOpen = win.XMLHttpRequest.prototype.open;
+                    win.XMLHttpRequest.prototype.open = function(method, url) {
+                        this._isTracker = shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url));
+                        this._blockUrl = url;
+                        return origIOpen.apply(this, arguments);
+                    };
+                    Object.defineProperty(win.XMLHttpRequest.prototype.open, 'length', { value: origIOpen.length });
+                    const origISend = win.XMLHttpRequest.prototype.send;
+                    win.XMLHttpRequest.prototype.send = function() {
+                        if (this._isTracker) {
+                            logBlock('XHR (iframe)', this._blockUrl);
+                            setTimeout(() => {
+                                Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+                                Object.defineProperty(this, 'status', { value: 200, configurable: true });
+                                if (this.responseType === 'json') {
+                                    Object.defineProperty(this, 'response', { value: { status: "ok" }, configurable: true });
+                                } else {
+                                    Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}', configurable: true });
+                                    Object.defineProperty(this, 'response', { value: '{"status":"ok"}', configurable: true });
+                                }
+                                this.dispatchEvent(new Event('readystatechange'));
+                                this.dispatchEvent(new Event('load'));
+                                this.dispatchEvent(new Event('loadend'));
+                            }, 1);
+                            return;
+                        }
+                        return origISend.apply(this, arguments);
+                    };
                 }
             } catch (e) { /* cross-origin — игнорируем */ }
         }
@@ -929,6 +1065,7 @@
             }
             return element;
         };
+        Object.defineProperty(document.createElement, 'length', { value: origCreateElement.length });
         makeNative(document, 'createElement');
 
         window.open = function(url, name, specs, replace) {
@@ -953,22 +1090,42 @@
             } catch (e) { /* cross-origin popup — игнорируем */ }
             return newWindow;
         };
+        Object.defineProperty(window.open, 'length', { value: origOpen.length });
         makeNative(window, 'open');
 
-        Element.prototype.attachShadow = function(init) {
-            return origAttachShadow.call(this, init);
-        };
-        makeNative(Element.prototype, 'attachShadow');
-    }
+        // ===== НОВОЕ: Наблюдатель за динамически добавляемыми iframe =====
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.tagName === 'IFRAME') {
+                        protectIframe(node);
+                    } else if (node.querySelectorAll) {
+                        node.querySelectorAll('iframe').forEach(protectIframe);
+                    }
+                }
+            }
+        });
+            observer.observe(document, { childList: true, subtree: true });
+        }
+    // ================================================================
 
-    // ========================== ЗАЩИТА ОТ ФИНГЕРПРИНТИНГА ==========================
     try {
-        // Улучшенные аппаратные характеристики (согласованы с UACH)
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+        // Улучшенные аппаратные характеристики (теперь в прототипе и с configurable)
+        Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 8, configurable: true });
+        Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true });
+        // Удаляем потенциальные собственные свойства, если они были созданы ранее
+        try { delete navigator.hardwareConcurrency; delete navigator.deviceMemory; } catch(e) {}
 
         // Canvas
         if (CONFIG.PROTECT_CANVAS) {
+            const ctx2dMap = new WeakMap();
+            const origGetContext = HTMLCanvasElement.prototype.getContext;
+            HTMLCanvasElement.prototype.getContext = function(type, ...attrs) {
+                const ctx = origGetContext.call(this, type, ...attrs);
+                if (type === '2d' && ctx) ctx2dMap.set(this, ctx);
+                return ctx;
+            };
+            makeNative(HTMLCanvasElement.prototype, 'getContext');
             const orgGetImageData = CanvasRenderingContext2D.prototype.getImageData;
             // Кэш: canvas → Uint8Array (чтобы один и тот же холст давал один и тот же шум)
             const canvasNoiseCache = new WeakMap();
@@ -999,6 +1156,41 @@
                 return imageData;
             };
             makeNative(CanvasRenderingContext2D.prototype, 'getImageData');
+            const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+                const ctx = ctx2dMap.get(this);
+                const w = this.width, h = this.height;
+                if (ctx && w > 0 && h > 0) {
+                    try {
+                        const clean = orgGetImageData.call(ctx, 0, 0, w, h); // Чистая копия
+                        const noisy = ctx.getImageData(0, 0, w, h);          // Наш шумный хук
+                        ctx.putImageData(noisy, 0, 0);
+                        const url = origToDataURL.call(this, type, quality);
+                        ctx.putImageData(clean, 0, 0);                        // ВОССТАНОВЛЕНИЕ
+                        return url;
+                    } catch (e) {}
+                }
+                return origToDataURL.call(this, type, quality);
+            };
+            makeNative(HTMLCanvasElement.prototype, 'toDataURL');
+
+            const origToBlob = HTMLCanvasElement.prototype.toBlob;
+            HTMLCanvasElement.prototype.toBlob = function(callback, type, quality) {
+                const ctx = ctx2dMap.get(this);
+                const w = this.width, h = this.height;
+                if (ctx && w > 0 && h > 0) {
+                    try {
+                        const clean = orgGetImageData.call(ctx, 0, 0, w, h);
+                        const noisy = ctx.getImageData(0, 0, w, h);
+                        ctx.putImageData(noisy, 0, 0);
+                        const result = origToBlob.call(this, callback, type, quality);
+                        ctx.putImageData(clean, 0, 0);
+                        return result;
+                    } catch (e) {}
+                }
+                return origToBlob.call(this, callback, type, quality);
+            };
+            makeNative(HTMLCanvasElement.prototype, 'toBlob');
         }
 
         // Audio (стабильный шум на сессию через кэш WeakMap)
@@ -1067,7 +1259,10 @@
                         config = { ...config, iceTransportPolicy: 'relay' };
                     }
                     const pc = new target(config);
-                    pc.addIceCandidate = function() { return Promise.resolve(); };
+                    // Блокируем кандидатов ТОЛЬКО в строгом режиме
+                    if (CONFIG.WEBRTC_STRICT) {
+                        pc.addIceCandidate = function() { return Promise.resolve(); };
+                    }
                     return pc;
                 }
             });
@@ -1075,17 +1270,9 @@
             makeNative(window, 'RTCPeerConnection');
         }
 
-        if (CONFIG.HIDE_CONNECTION && 'connection' in navigator) {
-            const connection = navigator.connection;
-            if (connection) {
-                Object.defineProperty(connection, 'effectiveType', { get: () => '4g' });
-                Object.defineProperty(connection, 'downlink', { get: () => 10 });
-                Object.defineProperty(connection, 'rtt', { get: () => 50 });
-            }
-        }
-
-        if (CONFIG.HIDE_WEBDRIVER && navigator.webdriver !== undefined) {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        if (CONFIG.HIDE_WEBDRIVER && 'webdriver' in navigator) {
+            Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true });
+            try { delete navigator.webdriver; } catch(e) {}
         }
 
         // Client Rects — микрошум в субпиксельных размерах
@@ -1122,17 +1309,13 @@
             Element.prototype.getBoundingClientRect = function() {
                 const rect = origGetBoundingClientRect.call(this);
                 const [n1, n2, n3, n4] = getRectNoise(this);
-                return {
-                    x: rect.x + n1,
-                    y: rect.y + n2,
-                    width: rect.width + n3,
-                    height: rect.height + n4,
-                    top: rect.top + n2,
-                    right: rect.right + n1 + n3,
-                    bottom: rect.bottom + n2 + n4,
-                    left: rect.left + n1,
-                    toJSON: rect.toJSON.bind(rect)
-                };
+                // Возвращаем настоящий DOMRect
+                return new DOMRect(
+                    rect.x + n1,
+                    rect.y + n2,
+                    rect.width + n3,
+                    rect.height + n4
+                );
             };
             makeNative(Element.prototype, 'getBoundingClientRect');
 
@@ -1140,25 +1323,23 @@
             Element.prototype.getClientRects = function() {
                 const rects = origGetClientRects.call(this);
                 const [n1, n2, n3, n4] = getRectNoise(this);
-                const noisy = [];
+                const list = [];
                 for (let i = 0; i < rects.length; i++) {
                     const r = rects[i];
-                    // Используем разные n для x/y и width/height,
-                    // чтобы сохранить согласованность x + width = right
-                    noisy.push({
-                        x: r.x + n1,
-                        y: r.y + n2,
-                        width: r.width + n3,
-                        height: r.height + n4,
-                        top: r.top + n2,
-                        right: r.right + n1 + n3,      // ← x + width
-                        bottom: r.bottom + n2 + n4,    // ← y + height
-                        left: r.left + n1
-                    });
+                    list.push(new DOMRect(
+                        r.x + n1,
+                        r.y + n2,
+                        r.width + n3,
+                        r.height + n4
+                    ));
                 }
-                // Эмулируем DOMRectList: добавляем метод item()
-                noisy.item = (i) => noisy[i] || null;
-                return noisy;
+                // Имитируем метод item() для совместимости
+                list.item = function(index) {
+                    return this[index] || null;
+                };
+                // НОВОЕ: Делаем вид, что это настоящий DOMRectList
+                Object.defineProperty(list, Symbol.toStringTag, { value: 'DOMRectList', configurable: true });
+                return list;
             };
             makeNative(Element.prototype, 'getClientRects');
         }
@@ -1166,45 +1347,55 @@
         // Мониторинг запросов разрешений (аналог DailyAnalyticsWorker из Android)
         // Android-версия MAX ежедневно проверяет статус разрешений через
         // DailyAnalyticsWorker. В веб-версии аналог — navigator.permissions.query.
-        if (CONFIG.MONITOR_PERMISSIONS && navigator.permissions && navigator.permissions.query) {
-            const origPermissionsQuery = navigator.permissions.query;
-            const PERM_NAMES = {
-                'camera': 'Запрос доступа к камере',
-                'microphone': 'Запрос доступа к микрофону',
-                'geolocation': 'Запрос доступа к геолокации',
-                'notifications': 'Запрос на уведомления',
-                'clipboard-read': 'Запрос доступа к буферу',
-                'clipboard-write': 'Запрос записи в буфер'
-            };
-            navigator.permissions.query = function(descriptor) {
+        if (CONFIG.MONITOR_PERMISSIONS && navigator.permissions && window.Permissions) {
+            const origPermissionsQuery = Permissions.prototype.query;
+            const customQuery = function(descriptor) {
                 try {
                     const permName = (descriptor && descriptor.name) || 'unknown';
+                    const PERM_NAMES = {
+                        'camera': 'Запрос доступа к камере',
+                        'microphone': 'Запрос доступа к микрофону',
+                        'geolocation': 'Запрос доступа к геолокации',
+                        'notifications': 'Запрос на уведомления',
+                        'clipboard-read': 'Запрос доступа к буферу',
+                        'clipboard-write': 'Запрос записи в буфер'
+                    };
                     logEvent('PERMISSION', '', PERM_NAMES[permName] || `Проверка: ${permName}`);
                 } catch (e) {}
-                return origPermissionsQuery.call(this, descriptor);
+                return origPermissionsQuery.apply(this, arguments);
             };
-            makeNative(navigator.permissions, 'query');
+            Object.defineProperty(customQuery, 'length', { value: origPermissionsQuery.length });
+            Permissions.prototype.query = customQuery;
+            makeNative(Permissions.prototype, 'query');
+            try { delete navigator.permissions.query; } catch(e) {}
         }
 
-        if (CONFIG.MONITOR_CLIPBOARD && navigator.clipboard) {
-            const origReadText = navigator.clipboard.readText;
+        if (CONFIG.MONITOR_CLIPBOARD && window.Clipboard) {
+            // readText
+            const origReadText = Clipboard.prototype.readText;
             if (origReadText) {
-                navigator.clipboard.readText = function() {
+                const customReadText = function() {
                     logEvent('CLIPBOARD', '', 'Мессенджер читает буфер обмена');
                     return origReadText.apply(this, arguments);
                 };
-                makeNative(navigator.clipboard, 'readText');
+                Object.defineProperty(customReadText, 'length', { value: origReadText.length });
+                Clipboard.prototype.readText = customReadText;
+                makeNative(Clipboard.prototype, 'readText');
+                try { delete navigator.clipboard.readText; } catch(e) {}
             }
-            const origRead = navigator.clipboard.read;
+            // read
+            const origRead = Clipboard.prototype.read;
             if (origRead) {
-                navigator.clipboard.read = function() {
+                const customRead = function() {
                     logEvent('CLIPBOARD', '', 'Мессенджер читает данные из буфера');
                     return origRead.apply(this, arguments);
                 };
-                makeNative(navigator.clipboard, 'read');
+                Object.defineProperty(customRead, 'length', { value: origRead.length });
+                Clipboard.prototype.read = customRead;
+                makeNative(Clipboard.prototype, 'read');
+                try { delete navigator.clipboard.read; } catch(e) {}
             }
         }
-
         if (CONFIG.FAKE_TIMEZONE && Intl.DateTimeFormat) {
             const origResolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions;
             Intl.DateTimeFormat.prototype.resolvedOptions = function() {
@@ -1253,17 +1444,6 @@
             Object.defineProperty(navigator, 'mimeTypes', { get: () => mimeArray, configurable: true });
         }
 
-        if (CONFIG.FAKE_FONTS) {
-            if (document.fonts && document.fonts.query) {
-                const origQuery = document.fonts.query;
-                document.fonts.query = function() {
-                    return Promise.resolve(['Arial', 'Verdana', 'Times New Roman', 'Courier New', 'Georgia']);
-                };
-                makeNative(document.fonts, 'query');
-            }
-        }
-
-        // measureText — независимая защита (не привязана к FAKE_FONTS)
         if (CONFIG.PROTECT_MEASURETEXT) {
             const orgMeasureText = CanvasRenderingContext2D.prototype.measureText;
             CanvasRenderingContext2D.prototype.measureText = function(text) {
@@ -1303,21 +1483,26 @@
             makeNative(CanvasRenderingContext2D.prototype, 'measureText');
         }
 
-        if (CONFIG.FAKE_BATTERY && navigator.getBattery) {
-            const origGetBattery = navigator.getBattery;
-            navigator.getBattery = function() {
-                const fakeBattery = {
-                    charging: false,
-                    level: 1,
-                    chargingTime: Infinity,
-                    dischargingTime: Infinity,
-                    addEventListener: () => {},
-                    removeEventListener: () => {},
-                    dispatchEvent: () => true
+        if (CONFIG.FAKE_BATTERY && window.Navigator) {
+            const origGetBattery = Navigator.prototype.getBattery;
+            if (origGetBattery) {
+                const customGetBattery = function() {
+                    const fakeBattery = {
+                        charging: false,
+                        level: 1,
+                        chargingTime: Infinity,
+                        dischargingTime: Infinity,
+                        addEventListener: () => {},
+                        removeEventListener: () => {},
+                        dispatchEvent: () => true
+                    };
+                    return Promise.resolve(fakeBattery);
                 };
-                return Promise.resolve(fakeBattery);
-            };
-            makeNative(navigator, 'getBattery');
+                Object.defineProperty(customGetBattery, 'length', { value: origGetBattery.length });
+                Navigator.prototype.getBattery = customGetBattery;
+                makeNative(Navigator.prototype, 'getBattery');
+                try { delete navigator.getBattery; } catch(e) {}
+            }
         }
 
         if (CONFIG.FIXED_SCREEN && window.screen) {
@@ -1344,20 +1529,23 @@
             } catch (e) {}
         }
 
-        if (CONFIG.BLOCK_SERVICE_WORKER && navigator.serviceWorker && navigator.serviceWorker.register) {
-            const originalRegister = navigator.serviceWorker.register;
-            navigator.serviceWorker.register = function(scriptURL, options) {
-                logBlock('SW', scriptURL, 'Заблокирована регистрация');
-                return Promise.reject(new Error('Service Worker registration blocked'));
-            };
-            makeNative(navigator.serviceWorker, 'register');
-        } else if (CONFIG.LOG_SERVICE_WORKER && navigator.serviceWorker && navigator.serviceWorker.register) {
-            const originalRegister = navigator.serviceWorker.register;
-            navigator.serviceWorker.register = function(scriptURL, options) {
-                console.log("📦 Service Worker registered:", scriptURL);
-                return originalRegister.call(this, scriptURL, options);
-            };
-            makeNative(navigator.serviceWorker, 'register');
+        if (window.ServiceWorkerContainer) {
+            const origRegister = ServiceWorkerContainer.prototype.register;
+            if (origRegister) {
+                const customRegister = function(scriptURL, options) {
+                    if (CONFIG.BLOCK_SERVICE_WORKER) {
+                        logBlock('SW', scriptURL, 'Заблокирована регистрация');
+                        return Promise.reject(new Error('Service Worker registration blocked'));
+                    } else if (CONFIG.LOG_SERVICE_WORKER) {
+                        console.log("📦 Service Worker registered:", scriptURL);
+                    }
+                    return origRegister.apply(this, arguments);
+                };
+                Object.defineProperty(customRegister, 'length', { value: origRegister.length });
+                ServiceWorkerContainer.prototype.register = customRegister;
+                makeNative(ServiceWorkerContainer.prototype, 'register');
+                try { delete navigator.serviceWorker.register; } catch(e) {}
+            }
         }
 
     } catch (e) {}
@@ -1378,66 +1566,539 @@
         const shadow = host.attachShadow({ mode: 'open' });
         uiShadow = shadow;
 
-                const style = document.createElement('style');
+        // Объявляем все переменные состояния в самом начале функции, чтобы не было конфликтов
+        let currentLogHeight = 180;
+        let isResizing = false;
+        let justFinishedResizing = false;
+        let startY = 0;
+        let startHeight = 0;
+        let startMainTop = 0; // Исходная верхняя координата при изменении высоты сверху
+
+        const style = document.createElement('style');
         style.textContent = `
             #pm-log-list::-webkit-scrollbar {
-                width: 6px;
-                height: 6px;
+                width: 8px;
+                height: 8px;
             }
-            #pm-log-list::-webkit-scrollbar-track {
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 3px;
+
+            #pm-copy {
+                position: relative;
             }
-            #pm-log-list::-webkit-scrollbar-thumb {
-                background: rgba(255, 255, 255, 0.2);
-                border-radius: 3px;
+            #pm-copy::after {
+                content: attr(data-tooltip);
+                position: absolute;
+                bottom: 100%;
+                left: 50%;
+                transform: translateX(-50%) translateY(-8px);
+                background: #343f50;
+                color: #ffffff;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 10px;
+                /* НОВЫЕ ПРАВИЛА ДЛЯ ПЕРЕНОСА: */
+                white-space: pre-wrap; /* Уважаем \n */
+                text-align: center;    /* Текст по центру */
+                width: max-content;    /* Ширина по содержимому */
+                max-width: 140px;      /* Ограничиваем ширину, чтобы не вылезал */
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.2s ease;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+                z-index: 100;
             }
-            #pm-log-list::-webkit-scrollbar-thumb:hover {
-                background: rgba(255, 255, 255, 0.3);
+            #pm-copy:hover::after {
+                opacity: 1;
+                transition-delay: 0.4s; /* Задержка 0.4 сек перед появлением */
             }
-            /* Прозрачность окна в свёрнутом виде */
+            /* Скрываем ручки, когда окно свернуто, и показываем, когда развернуто */
+            #pm-resize-handle, #pm-resize-handle-bottom {
+                display: none;
+                cursor: ns-resize;
+            }
+            #privacy-monitor.pm-open #pm-resize-handle,
+            #privacy-monitor.pm-open #pm-resize-handle-bottom {
+                display: block;
+            }
+
+            /* --- СТИЛИ ДЛЯ СТРОК ЛОГА --- */
+            .pm-log-entry {
+                position: relative;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+                padding: 5px 0;
+                color: #ffffff;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                font-size: 10px;
+                box-sizing: border-box;
+            }
+            /* Показываем тултип ТОЛЬКО если есть атрибут data-tooltip */
+            .pm-log-entry[data-tooltip]::after {
+                content: attr(data-tooltip);
+                position: absolute;
+                bottom: 100%;
+                left: 0;
+                background: #343f50;
+                color: #ffffff;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 10px;
+                white-space: normal;
+                max-width: 300px;
+                word-wrap: break-word;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.2s ease;
+                transition-delay: 0s;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+                z-index: 100;
+            }
+            .pm-log-entry[data-tooltip]:hover::after {
+                opacity: 1;
+                transition-delay: 0.4s;
+            }
+            /* Управление курсорами и прозрачностью */
             #privacy-monitor {
-                opacity: 0.5;
+                cursor: pointer; /* В свёрнутом виде — рука (клик для разворота) */
+                opacity: 0.4; /* Возвращаем полупрозрачность */
                 transition: opacity 0.2s ease;
             }
             #privacy-monitor:hover {
-                opacity: 1;
+                opacity: 1; /* Окрашивается при наведении */
             }
-            /* Если окно развёрнуто — всегда непрозрачное */
             #privacy-monitor.pm-open {
+                cursor: default;
                 opacity: 1;
             }
+
+            /* --- НОВЫЕ СТИЛИ (ШАГ 1) --- */
+            /* Универсальный класс для тултипов */
+            .pm-has-tooltip {
+                position: relative;
+            }
+            .pm-has-tooltip::after {
+                content: attr(data-tooltip);
+                position: absolute;
+                bottom: 100%;
+                left: 50%;
+                transform: translateX(-50%) translateY(-6px);
+                background: #343f50;
+                color: #ffffff;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 10px;
+                white-space: normal;
+                width: max-content;
+                max-width: 220px;
+                word-wrap: break-word;
+                text-align: center;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.2s ease;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+                z-index: 100;
+            }
+            .pm-has-tooltip:hover::after {
+                opacity: 1;
+                transition-delay: 0.4s;
+            }
+
+            /* Стили для чекбоксов */
+            .pm-chk-label {
+                display: flex;
+                align-items: center;
+                cursor: pointer;
+                font-size: 10px;
+                color: #67b3ff; /* Синий цвет текста */
+                user-select: none;
+            }
+
+            /* Стили для кастомных чекбоксов */
+            .pm-chk-label input[type="checkbox"] {
+                -webkit-appearance: none;
+                appearance: none;
+                margin: 0 5px 0 0; /* Отступ справа */
+                cursor: pointer;
+                width: 14px;  /* Размер 14x14 */
+                height: 14px;
+                background-color: rgba(50, 50, 70, 0.4); /* Прозрачный фон */
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 3px;
+                position: relative;
+                display: inline-block;
+                vertical-align: middle;
+                outline: none;
+            }
+
+            /* Сама отметка (символ ✓) */
+            .pm-chk-label input[type="checkbox"]::after {
+                content: '✓';
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                font-size: 11px; /* <-- УМЕНЬШИЛИ РАЗМЕР (было 14px) */
+                color: #ffffff;
+                line-height: 1;
+                opacity: 0;
+            }
+
+            /* Показываем галочку, когда чекбокс выбран */
+            .pm-chk-label input[type="checkbox"]:checked::after {
+                opacity: 1;
+            }
+            /* --- КОНЕЦ НОВЫХ СТИЛЕЙ --- */
         `;
         shadow.appendChild(style);
 
         const main = document.createElement('div');
         main.id = 'privacy-monitor';
         Object.assign(main.style, {
-            position: 'fixed', bottom: '15px', right: '20px', zIndex: '2147483647',
-            background: 'rgba(15, 15, 30, 0.6)', color: '#67b3ff', padding: '10px 14px',
-            borderRadius: '10px', fontSize: '11px', fontFamily: 'monospace',
+            position: 'fixed', zIndex: '2147483647',
+            background: 'rgba(15, 15, 30, 0.8)', color: '#67b3ff', padding: '10px 14px',
+            borderRadius: '12px', fontSize: '12px', fontFamily: 'monospace',
             boxShadow: '0 8px 32px rgba(0,0,0,0.3)', pointerEvents: 'auto',
-            cursor: 'pointer'
+            width: 'max-content', // Ширина ровно по содержимому
+            whiteSpace: 'nowrap', // Запрет переноса текста
         });
 
         main.innerHTML = `
+            <!-- Невидимая ручка на самом верху окна -->
+            <div id="pm-resize-handle" style="position: absolute; top: 0; left: 0; width: 100%; height: 15px; z-index: 10;"></div>
+            <!-- НОВОЕ: Невидимая ручка в самом низу окна -->
+            <div id="pm-resize-handle-bottom" style="position: absolute; bottom: 0; left: 0; width: 100%; height: 15px; z-index: 10;"></div>
             <div id="pm-header" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
                 <span id="pm-title-collapsed"><span id="pm-icon" style="display: inline-block;">🪬</span> <span id="pm-counter">${blockedCount}</span></span>
-                <span id="pm-title-expanded" style="display: none; flex: 1; text-align: center;"><span style="display: block; margin-bottom: 6px;">🪬 MAX Blinder</span>Заблокировано запросов: <span id="pm-counter-expanded">${blockedCount}</span></span>
+                <span id="pm-title-expanded" style="display: none; flex: 1; text-align: center;"><span style="display: block; margin-bottom: 4px;">🪬 MAX Blinder</span>Заблокировано запросов: <span id="pm-counter-expanded">${blockedCount}</span></span>
                 <span id="pm-arrow" style="display: none;">▲</span>
             </div>
-            <div id="pm-content" style="display: none; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 8px; width: 260px; cursor: default;">
-                <div id="pm-log-list" style="max-height: 150px; overflow-y: auto; margin-bottom: 8px;"></div>
-                <div style="display: flex; gap: 6px;">
-                    <button id="pm-copy" style="flex: 1; background: rgba(50,50,70,0.4); color: #67b3ff; border: none; padding: 2px 4px; cursor: pointer; border-radius: 3px; font-size: 9px; height: 18px;">Copy log</button>
-                    <button id="pm-clear" style="flex: 1; background: rgba(50,50,70,0.4); color: #67b3ff; border: none; padding: 2px 4px; cursor: pointer; border-radius: 3px; font-size: 9px; height: 18px;">Clear log</button>
+            <div id="pm-content" style="display: none; margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 6px; width: 250px; cursor: default;">
+                <div id="pm-log-list" style="overflow-y: auto; margin-bottom: 10px;"></div>
+                <!-- НОВАЯ ПАНЕЛЬ УПРАВЛЕНИЯ -->
+                <div style="display: flex; gap: 8px; align-items: center; justify-content: space-between;">
+                    <!-- Левая часть: Чекбокс отключения звука -->
+                    <div style="display: flex; gap: 8px;">
+                        <label class="pm-chk-label pm-has-tooltip" data-tooltip="Полностью отключить все звуки уведомлений и звонков">
+                            <input type="checkbox" id="pm-chk-mute">
+                            Без звука
+                        </label>
+                    </div>
+
+                    <!-- Правая часть: Меню -->
+                    <div style="position: relative;">
+                        <!-- Новая SVG-иконка с узкими полосками -->
+                        <button id="pm-menu-btn" class="pm-has-tooltip" data-tooltip="Меню" style="background: rgba(50,50,70,0.4); color: #67b3ff; border: none; cursor: pointer; border-radius: 4px; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; padding: 0;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                                <line x1="4" y1="6" x2="20" y2="6"></line>
+                                <line x1="4" y1="12" x2="20" y2="12"></line>
+                                <line x1="4" y1="18" x2="20" y2="18"></line>
+                            </svg>
+                        </button>
+                        <!-- Выпадающее меню -->
+                        <div id="pm-menu-dropdown" style="display: none; position: absolute; bottom: 100%; right: 0; margin-bottom: 6px; background: #343f50; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 4px; padding: 4px; z-index: 200; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.25);">
+                            <button id="pm-menu-save" style="display: block; width: 100%; text-align: left; background: none; color: #ffffff; border: none; padding: 6px 10px; cursor: pointer; font-size: 10px; border-radius: 2px; transition: background 0.2s;">Сохранить лог</button>
+                            <button id="pm-menu-clear" style="display: block; width: 100%; text-align: left; background: none; color: #ffffff; border: none; padding: 6px 10px; cursor: pointer; font-size: 10px; border-radius: 2px; transition: background 0.2s;">Очистить лог</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         `;
 
+        shadow.appendChild(main);
+
+        // Сохраняем позицию как расстояние в пикселях от выбранных краёв.
+        // Проценты оставляем только для совместимости со старыми версиями.
+        function saveWindowPosition(rect = main.getBoundingClientRect()) {
+            if (typeof main._isLeft !== 'boolean') {
+                main._isLeft = rect.left < (window.innerWidth / 2);
+            }
+            if (typeof main._isTop !== 'boolean') {
+                main._isTop = rect.top < (window.innerHeight / 2);
+            }
+
+            const offsetX = main._isLeft ? rect.left : window.innerWidth - rect.right;
+            const offsetY = main._isTop ? rect.top : window.innerHeight - rect.bottom;
+            main._offsetX = offsetX;
+            main._offsetY = offsetY;
+
+            try {
+                localStorage.setItem('pm_window_anchor_x', main._isLeft ? 'left' : 'right');
+                localStorage.setItem('pm_window_anchor_y', main._isTop ? 'top' : 'bottom');
+                localStorage.setItem('pm_window_offset_x_px', String(offsetX));
+                localStorage.setItem('pm_window_offset_y_px', String(offsetY));
+
+                // Для совместимости при откате на старую версию.
+                localStorage.setItem('pm_window_left_pct', String((rect.left / window.innerWidth) * 100));
+                localStorage.setItem('pm_window_top_pct', String((rect.top / window.innerHeight) * 100));
+            } catch (err) {}
+        }
+
+        // ===== ЗАЩИТА ОТ ВЫХОДА ОКНА ЗА ГРАНИЦЫ VIEWPORT =====
+        const viewportSafetyGap = 8;
+
+        // Если раскрытая панель не помещается по высоте, временно уменьшаем
+        // только список логов. currentLogHeight хранит желаемую высоту и позволяет
+        // восстановить её, когда браузер снова станет выше.
+        function fitExpandedPanelHeight() {
+            if (!main.classList.contains('pm-open')) return;
+            const list = main.querySelector('#pm-log-list');
+            if (!list) return;
+
+            const listHeight = list.offsetHeight;
+            const extraHeight = Math.max(0, main.offsetHeight - listHeight);
+            const availableListHeight = Math.max(
+                0,
+                window.innerHeight - viewportSafetyGap * 2 - extraHeight
+            );
+            const preferredHeight = Number.isFinite(currentLogHeight)
+                ? Math.max(0, currentLogHeight)
+                : listHeight;
+            const targetHeight = Math.min(preferredHeight, availableListHeight);
+
+            list.style.height = targetHeight + 'px';
+            list.style.maxHeight = targetHeight + 'px';
+        }
+
+        // Если панель после изменения размера или смены состояния выходит за экран,
+        // выбираем ближайший из четырёх углов и закрепляем её там.
+        function snapToNearestCornerIfOutside() {
+            const rect = main.getBoundingClientRect();
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+            const outside = rect.left < 0 || rect.top < 0 ||
+                rect.right > viewportWidth || rect.bottom > viewportHeight;
+            if (!outside) return false;
+
+            const canFitHorizontally = rect.width <= viewportWidth - viewportSafetyGap * 2;
+            const canFitVertically = rect.height <= viewportHeight - viewportSafetyGap * 2;
+            const rightLeft = canFitHorizontally
+                ? viewportWidth - rect.width - viewportSafetyGap
+                : viewportSafetyGap;
+            const bottomTop = canFitVertically
+                ? viewportHeight - rect.height - viewportSafetyGap
+                : viewportSafetyGap;
+
+            const horizontalCandidates = [
+                { left: viewportSafetyGap, isLeft: true },
+                { left: rightLeft, isLeft: canFitHorizontally ? false : true }
+            ];
+            const verticalCandidates = [
+                { top: viewportSafetyGap, isTop: true },
+                { top: bottomTop, isTop: canFitVertically ? false : true }
+            ];
+
+            let best = null;
+            let bestDistance = Infinity;
+            for (const horizontal of horizontalCandidates) {
+                for (const vertical of verticalCandidates) {
+                    const dx = rect.left - horizontal.left;
+                    const dy = rect.top - vertical.top;
+                    const distance = dx * dx + dy * dy;
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        best = { ...horizontal, ...vertical };
+                    }
+                }
+            }
+
+            main._isLeft = best.isLeft;
+            main._isTop = best.isTop;
+            main.style.left = best.left + 'px';
+            main.style.top = best.top + 'px';
+            main.style.right = 'auto';
+            main.style.bottom = 'auto';
+            main._offsetX = viewportSafetyGap;
+            main._offsetY = viewportSafetyGap;
+            return true;
+        }
+        // ========================================================
+
+        // ===== ЛОГИКА ПЕРЕТАСКИВАНИЯ ОКНА =====
+        const savedLeftPct = localStorage.getItem('pm_window_left_pct');
+        const savedTopPct = localStorage.getItem('pm_window_top_pct');
+        const savedAnchorX = localStorage.getItem('pm_window_anchor_x');
+        const savedAnchorY = localStorage.getItem('pm_window_anchor_y');
+        const savedOffsetX = parseFloat(localStorage.getItem('pm_window_offset_x_px'));
+        const savedOffsetY = parseFloat(localStorage.getItem('pm_window_offset_y_px'));
+        const hasPixelPosition =
+            (savedAnchorX === 'left' || savedAnchorX === 'right') &&
+            (savedAnchorY === 'top' || savedAnchorY === 'bottom') &&
+            Number.isFinite(savedOffsetX) && Number.isFinite(savedOffsetY);
+
+        if (hasPixelPosition) {
+            main._isLeft = savedAnchorX === 'left';
+            main._isTop = savedAnchorY === 'top';
+            main._offsetX = savedOffsetX;
+            main._offsetY = savedOffsetY;
+            main.style.left = (main._isLeft
+                ? savedOffsetX
+                : window.innerWidth - savedOffsetX - main.offsetWidth) + 'px';
+            main.style.top = (main._isTop
+                ? savedOffsetY
+                : window.innerHeight - savedOffsetY - main.offsetHeight) + 'px';
+        } else if (savedLeftPct !== null && savedTopPct !== null) {
+            // Миграция координат из старого процентного формата.
+            main.style.left = (parseFloat(savedLeftPct) / 100 * window.innerWidth) + 'px';
+            main.style.top = (parseFloat(savedTopPct) / 100 * window.innerHeight) + 'px';
+            const initialRect = main.getBoundingClientRect();
+            main._isLeft = initialRect.left < (window.innerWidth / 2);
+            main._isTop = initialRect.top < (window.innerHeight / 2);
+            saveWindowPosition(initialRect);
+        } else {
+            main.style.left = (window.innerWidth - 100) + 'px';
+            main.style.top = (window.innerHeight - 50) + 'px';
+            const initialRect = main.getBoundingClientRect();
+            main._isLeft = initialRect.left < (window.innerWidth / 2);
+            main._isTop = initialRect.top < (window.innerHeight / 2);
+            saveWindowPosition(initialRect);
+        }
+
+        // Сохраняем размер viewport для обработки его изменения.
+        main._lastViewportWidth = window.innerWidth;
+        main._lastViewportHeight = window.innerHeight;
+        if (snapToNearestCornerIfOutside()) saveWindowPosition();
+
+        let isDragging = false;
+        let dragStartX, dragStartY, startLeft, startTop;
+        let isMouseDown = false;
+
+        main.addEventListener('mousedown', (e) => {
+            if (main.classList.contains('pm-open') && !e.target.closest('#pm-header')) return;
+            if (e.target.closest('#pm-menu-btn') || e.target.closest('.pm-chk-label')) return;
+
+            isResizing = false;
+            e.preventDefault();
+            isMouseDown = true;
+            isDragging = false;
+
+            const rect = main.getBoundingClientRect();
+            startLeft = rect.left;
+            startTop = rect.top;
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isMouseDown) return;
+            const deltaX = e.clientX - dragStartX;
+            const deltaY = e.clientY - dragStartY;
+            if (!isDragging && (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)) {
+                isDragging = true;
+                document.body.style.cursor = 'grabbing';
+            }
+            if (isDragging) {
+                let newLeft = startLeft + deltaX;
+                let newTop = startTop + deltaY;
+
+                const rect = main.getBoundingClientRect();
+                const gap = viewportSafetyGap;
+                const minLeft = gap;
+                const minTop = gap;
+                const maxLeft = Math.max(minLeft, window.innerWidth - rect.width - gap);
+                const maxTop = Math.max(minTop, window.innerHeight - rect.height - gap);
+
+                if (newLeft < minLeft) newLeft = minLeft;
+                if (newLeft > maxLeft) newLeft = maxLeft;
+                if (newTop < minTop) newTop = minTop;
+                if (newTop > maxTop) newTop = maxTop;
+
+                main.style.left = newLeft + 'px';
+                main.style.top = newTop + 'px';
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isMouseDown) {
+                isMouseDown = false;
+                document.body.style.cursor = '';
+                if (isDragging) {
+                    isDragging = false;
+                    isResizing = false;
+                    justFinishedResizing = true;
+                    setTimeout(() => { justFinishedResizing = false; }, 100);
+
+                    let rect = main.getBoundingClientRect();
+                    // После перетаскивания выбираем угол по положению окна.
+                    main._isLeft = rect.left < (window.innerWidth / 2);
+                    main._isTop = rect.top < (window.innerHeight / 2);
+                    if (snapToNearestCornerIfOutside()) {
+                        rect = main.getBoundingClientRect();
+                    }
+                    saveWindowPosition(rect);
+                }
+            }
+        });
+
+        // Единый обработчик resize для свёрнутого и раскрытого окна.
+        // Сохраняем привязку к краям, а при риске выхода за экран переносим панель
+        // в ближайший угол. При необходимости временно уменьшаем список логов.
+        window.addEventListener('resize', () => {
+            const currentWidth = window.innerWidth;
+            const currentHeight = window.innerHeight;
+            const previousWidth = main._lastViewportWidth ?? currentWidth;
+            const previousHeight = main._lastViewportHeight ?? currentHeight;
+
+            fitExpandedPanelHeight();
+            const rect = main.getBoundingClientRect();
+
+            if (typeof main._isLeft !== 'boolean') {
+                main._isLeft = rect.left < (currentWidth / 2);
+            }
+            if (typeof main._isTop !== 'boolean') {
+                main._isTop = rect.top < (currentHeight / 2);
+            }
+
+            // Запасной расчёт нужен только если позиция ещё не была сохранена.
+            const offsetX = Number.isFinite(main._offsetX)
+                ? main._offsetX
+                : (main._isLeft ? rect.left : previousWidth - rect.right);
+            const offsetY = Number.isFinite(main._offsetY)
+                ? main._offsetY
+                : (main._isTop ? rect.top : previousHeight - rect.bottom);
+
+            main.style.left = (main._isLeft
+                ? offsetX
+                : currentWidth - offsetX - rect.width) + 'px';
+            main.style.top = (main._isTop
+                ? offsetY
+                : currentHeight - offsetY - rect.height) + 'px';
+            main.style.right = 'auto';
+            main.style.bottom = 'auto';
+
+            snapToNearestCornerIfOutside();
+            saveWindowPosition();
+            main._lastViewportWidth = currentWidth;
+            main._lastViewportHeight = currentHeight;
+        });
+        // ======================================================
+        // ===== ВЫСЧИТЫВАЕМ ВЫСОТУ РОВНО ДЛЯ 3 СТРОК =====
+        const tempEntry = document.createElement('div');
+        // Применяем те же стили, что и у обычной строки лога
+        tempEntry.style.cssText = 'border-bottom: 1px solid rgba(255,255,255,0.1); padding: 5px 0; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px;';
+        tempEntry.innerHTML = 'test';
+        main.appendChild(tempEntry);
+        const singleLineHeight = tempEntry.offsetHeight; // Измеряем одну строку
+        main.removeChild(tempEntry); // Удаляем
+        const defaultHeight = singleLineHeight * 3; // Высота ровно для 3 строк
+        currentLogHeight = defaultHeight; // Обновляем переменную (без повторного let)
+
+        const logList = main.querySelector('#pm-log-list');
+        // Сразу применяем эту высоту к списку логов
+        logList.style.height = currentLogHeight + 'px';
+        logList.style.maxHeight = currentLogHeight + 'px';
+        const resizeHandle = main.querySelector('#pm-resize-handle');
+
+        // ===== ОБРАБОТЧИКИ КЛИКОВ =====
         main.onclick = (e) => {
-            // Игнорируем клики внутри развёрнутого содержимого (лог, кнопки)
-            if (e.target.closest('#pm-content')) return;
+            if (justFinishedResizing) return;
+            if (e.target.closest('#pm-content') || e.target.id === 'pm-resize-handle' || e.target.id === 'pm-resize-handle-bottom') return;
 
             const content = main.querySelector('#pm-content');
             const arrow = main.querySelector('#pm-arrow');
@@ -1445,88 +2106,287 @@
             const expanded = main.querySelector('#pm-title-expanded');
             const isOpen = content.style.display === 'block';
 
-            content.style.display = isOpen ? 'none' : 'block';
-            arrow.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(180deg)';
-            collapsed.style.display = isOpen ? 'inline' : 'none';
-            expanded.style.display = isOpen ? 'none' : 'inline';
+            // 1. Запоминаем координаты ДО изменения
+            const rectBefore = main.getBoundingClientRect();
 
-            // Управление прозрачностью
-            if (isOpen) {
-                main.classList.remove('pm-open');
-            } else {
+            if (!isOpen) {
+                // РАЗВОРАЧИВАЕМ
+                // Определяем квадрант ТОЛЬКО когда окно маленькое, и запоминаем его
+                main._isLeft = rectBefore.left < (window.innerWidth / 2);
+                main._isTop = rectBefore.top < (window.innerHeight / 2);
+
+                content.style.display = 'block';
+                arrow.style.transform = 'rotate(180deg)';
+                collapsed.style.display = 'none';
+                expanded.style.display = 'inline';
                 main.classList.add('pm-open');
+
+                if (logList) {
+                    logList.style.height = currentLogHeight + 'px';
+                    logList.style.maxHeight = currentLogHeight + 'px';
+                    logList.scrollTop = 0;
+                }
+            } else {
+                // СВОРАЧИВАЕМ
+                content.style.display = 'none';
+                arrow.style.transform = 'rotate(0deg)';
+                collapsed.style.display = 'inline';
+                expanded.style.display = 'none';
+                main.classList.remove('pm-open');
+                if (logList) {
+                    logList.style.height = '';
+                    logList.style.maxHeight = '';
+                }
             }
+
+            // Перед расчётом геометрии подгоняем список логов под доступную высоту.
+            fitExpandedPanelHeight();
+
+            // 2. Принудительно заставляем браузер пересчитать размеры
+            main.offsetHeight;
+            const rectAfter = main.getBoundingClientRect();
+
+            // 3. Привязываем к нужному краю (используя СОХРАНЕННЫЙ квадрант)
+            let newLeft = rectBefore.left;
+            let newTop = rectBefore.top;
+
+            // Если окно было в правой половине, фиксируем ПРАВЫЙ край
+            if (main._isLeft === false) {
+                newLeft = rectBefore.right - rectAfter.width;
+            }
+            // Если окно было в нижней половине, фиксируем НИЖНИЙ край
+            if (main._isTop === false) {
+                newTop = rectBefore.bottom - rectAfter.height;
+            }
+
+            // 4. Применяем новые координаты
+            main.style.left = newLeft + 'px';
+            main.style.top = newTop + 'px';
+            main.style.right = 'auto';
+            main.style.bottom = 'auto';
+
+            // Если после разворачивания/сворачивания панель вышла за экран,
+            // переносим её в ближайший угол и сохраняем уже безопасную позицию.
+            snapToNearestCornerIfOutside();
+            saveWindowPosition();
         };
-
-        main.querySelector('#pm-copy').onclick = async (e) => {
+        main.querySelector('#pm-menu-save').onclick = (e) => {
             e.stopPropagation();
-            const btn = e.target;
-            const originalText = btn.innerText;
+            main.querySelector('#pm-menu-dropdown').style.display = 'none'; // Закрываем меню после клика
 
-            // Шапка лога — формат: DD.MM.YYYY HH:MM:SS
             const now = new Date();
             const pad = (n) => String(n).padStart(2, '0');
             const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+            const safeDateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
 
-            const header =
-                `MAX Blinder v2.01\n` +
-                `— Журнал блокировок ${dateStr} —\n\n` +
-                fullLogHistory.join('\n');
+            const header = `MAX Blinder v2.02\n— Журнал блокировок ${dateStr} —\n\n` + fullLogHistory.join('\n');
+            const filename = `MAX Blinder v2.02 — Журнал блокировок ${safeDateStr}.txt`;
 
-            const fullText = header;
+            const blob = new Blob([header], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.id = 'pm-download-temp';
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
 
-            try {
-                await navigator.clipboard.writeText(fullText);
-                btn.innerText = 'Copied!';
-                setTimeout(() => btn.innerText = originalText, 1000);
-            } catch (err) {
-                console.warn('Clipboard API failed, trying fallback...', err);
-                try {
-                    const textarea = document.createElement('textarea');
-                    textarea.value = fullText;
-                    document.body.appendChild(textarea);
-                    textarea.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(textarea);
-                    btn.innerText = 'Copied!';
-                    setTimeout(() => btn.innerText = originalText, 1000);
-                } catch (fallbackErr) {
-                    console.error('Fallback copy failed:', fallbackErr);
-                    btn.innerText = 'Error!';
-                    setTimeout(() => btn.innerText = originalText, 1500);
-                }
-            }
+            setTimeout(() => {
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            }, 100);
         };
-        main.querySelector('#pm-clear').onclick = (e) => {
+
+        main.querySelector('#pm-menu-clear').onclick = (e) => {
             e.stopPropagation();
+            main.querySelector('#pm-menu-dropdown').style.display = 'none'; // Закрываем меню после клика
             blockedCount = 0;
             fullLogHistory = [];
             pendingLogs = [];
             main.querySelector('#pm-counter').innerText = '0';
+            main.querySelector('#pm-counter-expanded').innerText = '0';
             main.querySelector('#pm-log-list').innerHTML = '';
-        };
 
-        shadow.appendChild(main);
-                // Сворачивание окна при клике вне его (только если развёрнуто)
+        };
+        // ===== ЛОГИКА ВЫПАДАЮЩЕГО МЕНЮ (ШАГ 4.3) =====
+        const menuBtn = main.querySelector('#pm-menu-btn');
+        const menuDropdown = main.querySelector('#pm-menu-dropdown');
+
+        menuBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // Чтобы клик не сворачивал всё окно
+            const isHidden = menuDropdown.style.display === 'none' || !menuDropdown.style.display;
+            menuDropdown.style.display = isHidden ? 'block' : 'none';
+        });
+
+        // Закрываем меню при клике в любом другом месте
         document.addEventListener('click', (e) => {
+            if (menuDropdown.style.display === 'block') {
+                const path = e.composedPath ? e.composedPath() : [];
+                if (!path.includes(menuDropdown) && !path.includes(menuBtn)) {
+                    menuDropdown.style.display = 'none';
+                }
+            }
+        });
+        // =====================================
+
+        // ===== ЛОГИКА ИЗМЕНЕНИЯ РАЗМЕРА ОКНА =====
+        const resizeHandleBottom = main.querySelector('#pm-resize-handle-bottom');
+        // Обработчик для ВЕРХНЕЙ ручки (тянем вверх)
+        resizeHandle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            isResizing = 'top'; // Запоминаем, какую ручку тянут
+            startY = e.clientY;
+            startHeight = logList.offsetHeight;
+            startMainTop = main.getBoundingClientRect().top;
+            logList.style.maxHeight = startHeight + 'px';
+            logList.style.height = startHeight + 'px';
+            document.body.style.cursor = 'ns-resize';
+        });
+
+        // Обработчик для НИЖНЕЙ ручки (тянем вниз)
+        if (resizeHandleBottom) {
+            resizeHandleBottom.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                isResizing = 'bottom';
+                startY = e.clientY;
+                startHeight = logList.offsetHeight;
+                logList.style.maxHeight = startHeight + 'px';
+                logList.style.height = startHeight + 'px';
+                document.body.style.cursor = 'ns-resize';
+            });
+        }
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing || isMouseDown) return;
+            if (e.buttons === 0) {
+                isResizing = false;
+                document.body.style.cursor = '';
+                justFinishedResizing = true;
+                setTimeout(() => { justFinishedResizing = false; }, 100);
+                currentLogHeight = logList.offsetHeight;
+                saveWindowPosition();
+                return;
+            }
+
+            const deltaY = startY - e.clientY;
+            let newHeight = startHeight;
+
+            if (isResizing === 'top') {
+                // Верхняя ручка: движение вверх увеличивает высоту
+                newHeight = startHeight + deltaY;
+            } else if (isResizing === 'bottom') {
+                // Нижняя ручка: движение вниз увеличивает высоту
+                newHeight = startHeight - deltaY;
+            }
+            const minHeight = defaultHeight;
+            const extraHeight = main.offsetHeight - logList.offsetHeight;
+            // Сохраняем минимальный отступ от нижнего края viewport.
+            const maxTotalHeight = window.innerHeight - viewportSafetyGap;
+            let maxHeight = maxTotalHeight - extraHeight;
+            if (maxHeight < minHeight) maxHeight = minHeight;
+
+            // При растягивании сверху нижний край остаётся на месте.
+            // Не позволяем верхнему краю уйти выше начала окна браузера.
+            if (isResizing === 'top') {
+                const maxHeightFromTop = startHeight + startMainTop - viewportSafetyGap;
+                if (maxHeight > maxHeightFromTop) maxHeight = maxHeightFromTop;
+            } else if (isResizing === 'bottom') {
+                // При растягивании снизу верхний край остаётся на месте.
+                // Сохраняем viewportSafetyGap между панелью и нижним краем viewport.
+                const currentTop = main.getBoundingClientRect().top;
+                const maxHeightFromBottom = Math.max(
+                    0,
+                    window.innerHeight - viewportSafetyGap - currentTop - extraHeight
+                );
+                if (maxHeight > maxHeightFromBottom) maxHeight = maxHeightFromBottom;
+            }
+
+            if (newHeight < minHeight) newHeight = minHeight;
+            if (newHeight > maxHeight) newHeight = maxHeight;
+
+            if (isResizing === 'top') {
+                main.style.top = (startMainTop + startHeight - newHeight) + 'px';
+            }
+            logList.style.maxHeight = newHeight + 'px';
+            logList.style.height = newHeight + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizing) {
+                isResizing = false;
+                document.body.style.cursor = '';
+                justFinishedResizing = true;
+                setTimeout(() => { justFinishedResizing = false; }, 100);
+                currentLogHeight = logList.offsetHeight;
+                fitExpandedPanelHeight();
+                snapToNearestCornerIfOutside();
+                saveWindowPosition();
+            }
+        });
+        // ===== ОБРАБОТЧИК ЧЕКБОКСА "БЕЗ ЗВУКА" =====
+        const chkMute = main.querySelector('#pm-chk-mute');
+        if (chkMute) {
+            // Восстанавливаем состояние из памяти при загрузке
+            chkMute.checked = (CONFIG.MUTE_SOUNDS === true);
+            chkMute.addEventListener('change', (e) => {
+                CONFIG.MUTE_SOUNDS = e.target.checked;
+                try {
+                    // Сохраняем СТРОГО как строку
+                    localStorage.setItem('pm_mute_sounds', e.target.checked ? 'true' : 'false');
+                } catch(err) {
+                    console.warn('Не удалось сохранить настройку звука', err);
+                }
+                // Перезагружаем страницу, чтобы применить настройку
+                location.reload();
+            });
+        }
+        // =================================================================
+
+        // Сворачивание окна при клике вне его
+        document.addEventListener('click', (e) => {
+
+            if (isResizing || justFinishedResizing) return;
+
             const content = main.querySelector('#pm-content');
             if (content.style.display !== 'block') return;
-            const path = e.composedPath ? e.composedPath() : [];
-            if (path.includes(host)) return;
 
+            const path = e.composedPath ? e.composedPath() : [];
+            if (path.includes(host) || path.some(el => el && el.id === 'pm-download-temp')) return;
+
+            // Запоминаем геометрию раскрытого окна, чтобы после сворачивания
+            // закрепить мини-виджет за тем же углом.
+            const rectBefore = main.getBoundingClientRect();
             content.style.display = 'none';
 
             const arrow = main.querySelector('#pm-arrow');
             if (arrow) arrow.style.transform = 'rotate(0deg)';
 
-            // Возвращаем свёрнутый заголовок
             const collapsed = main.querySelector('#pm-title-collapsed');
             const expanded = main.querySelector('#pm-title-expanded');
             if (collapsed) collapsed.style.display = 'inline';
             if (expanded) expanded.style.display = 'none';
 
-            // Сбрасываем прозрачность к свёрнутому состоянию
             main.classList.remove('pm-open');
+            if (logList) {
+                logList.style.height = '';
+                logList.style.maxHeight = '';
+            }
+
+            // Пересчитываем размер и привязываем мини-виджет к тому же углу.
+            main.offsetHeight;
+            const rectAfter = main.getBoundingClientRect();
+            let newLeft = rectBefore.left;
+            let newTop = rectBefore.top;
+            if (main._isLeft === false) newLeft = rectBefore.right - rectAfter.width;
+            if (main._isTop === false) newTop = rectBefore.bottom - rectAfter.height;
+            main.style.left = newLeft + 'px';
+            main.style.top = newTop + 'px';
+            main.style.right = 'auto';
+            main.style.bottom = 'auto';
+            snapToNearestCornerIfOutside();
+            saveWindowPosition();
         }, true);
         const logContainer = shadow.getElementById('pm-log-list');
         while (pendingLogs.length > 0) {
@@ -1534,7 +2394,6 @@
         }
         shadow.getElementById('pm-counter').innerText = blockedCount;
     }
-
     // ========================== ОЧИСТКА КЭША ДЕДУПЛИКАЦИИ ==========================
     setInterval(() => {
         const now = Date.now();
