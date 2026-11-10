@@ -1,21 +1,66 @@
 // ==UserScript==
 // @name         MAX Blinder
 // @namespace    http://tampermonkey.net/
-// @version      2.02
-// @description  Ограничение телеметрии web-версии мессенджера MAX (Макс)
+// @version      2.03
+// @description  Ограничение отслеживания web-версии мессенджера MAX (Макс) + скрытие статусов «Печатает» и «Прочитано»
 // @author       Echo91
 // @match        https://*.max.ru/*
 // @license      MIT
 // @run-at       document-start
 // @inject-into  page
 // @sandbox      JavaScript
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @downloadURL https://update.greasyfork.org/scripts/570049/MAX%20Blinder.user.js
 // @updateURL https://update.greasyfork.org/scripts/570049/MAX%20Blinder.meta.js
 // ==/UserScript==
 
 (function() {
     'use strict';
+    // ====================== ХРАНИЛИЩЕ НАСТРОЕК ======================
+    // Переносим старые настройки из localStorage в Tampermonkey Storage.
+    // После успешного переноса удаляем старую копию.
+    function getStoredSetting(key, defaultValue = null) {
+        try {
+            const value = GM_getValue(key, undefined);
+
+            if (value !== undefined) {
+                return value;
+            }
+        } catch (err) {
+            console.warn(`[MAX Blinder] Ошибка чтения настройки ${key}`, err);
+        }
+
+        try {
+            const legacyValue = localStorage.getItem(key);
+
+            if (legacyValue !== null) {
+                try {
+                    GM_setValue(key, legacyValue);
+                    localStorage.removeItem(key);
+                } catch (err) {
+                    console.warn(
+                        `[MAX Blinder] Не удалось перенести настройку ${key}`,
+                        err
+                    );
+                }
+
+                return legacyValue;
+            }
+        } catch (err) {
+            console.warn(`[MAX Blinder] Ошибка миграции настройки ${key}`, err);
+        }
+
+        return defaultValue;
+    }
+
+    function setStoredSetting(key, value) {
+        try {
+            GM_setValue(key, String(value));
+        } catch (err) {
+            console.warn(`[MAX Blinder] Не удалось сохранить настройку ${key}`, err);
+        }
+    }
 
     // ========================== КОНФИГУРАЦИЯ ==========================
     const CONFIG = {
@@ -32,6 +77,8 @@
         WEBRTC_STRICT: false,
         BLOCK_FETCH_XHR: true,
         BLOCK_WEBSOCKET_OPCODE5: true,
+        HIDE_TYPING: getStoredSetting('pm_hide_typing', 'false') === 'true',
+        HIDE_READ_RECEIPTS: getStoredSetting('pm_hide_read_receipts', 'false') === 'true',
         BLOCK_BEACON: true,
         BLOCK_SERVICE_WORKER: true,
         CLEAR_SERVICE_WORKERS: true,
@@ -71,13 +118,14 @@
         BLOCK_VPN_DETECTION: true,           // маскировка флага VPN в HOST_REACHABILITY
         MUTE_SOUNDS: false                   // Отключить все звуки мессенджера
     };
+    // Версия бинарного протокола MAX
+    const MAX_PROTOCOL_VERSION = 0x0A;
+    // Однократные диагностические предупреждения для бинарного WebSocket.
+    let warnedBlobWebSocketSend = false;
+    let warnedUnknownMaxProtocolVersion = false;
 
-    // Загружаем сохраненные настройки из localStorage
-    try {
-        CONFIG.MUTE_SOUNDS = localStorage.getItem('pm_mute_sounds') === 'true';
-    } catch (e) {
-        console.warn('Не удалось загрузить настройки из localStorage', e);
-    }
+    // Загружаем сохранённую настройку звука из Tampermonkey Storage
+    CONFIG.MUTE_SOUNDS = getStoredSetting('pm_mute_sounds', 'false') === 'true';
     // ========================== ДЕТЕРМИНИРОВАННЫЙ PRNG ==========================
     // Генерируем сид на основе стабильных параметров браузера (не использует хранилища)
     const FINGERPRINT_SEED = (() => {
@@ -109,6 +157,7 @@
     const maxLogs = 40;
     const MAX_LOG_HISTORY = 5000;
     let pendingLogs = [];
+    let uiHost = null;
     let uiShadow = null;
 
     // Защита от дублирования записей
@@ -126,12 +175,25 @@
     // Точные домены. Матч: hostname === domain ИЛИ hostname.endsWith('.' + domain)
     const BLOCK_DOMAINS = [
         // IP-определители
-        'api.ipify.org', 'ifconfig.me', 'ident.me', 'checkip.amazonaws.com',
+        'api.ipify.org', 'api64.ipify.org', 'ifconfig.me', 'ident.me', 'checkip.amazonaws.com',
         'ip.mail.ru', '2ip.ru', 'ipinfo.io', 'ip-api.com', 'myexternalip.com',
         'icanhazip.com', 'jsonip.com', 'wtfismyip.com', 'ifconfig.co',
-        'api.ipapi.is', 'iplocate.io', 'ip.sb',
+        'api.ipapi.is', 'iplocate.io', 'ip.sb', 'whoer.net',
         // Трекеры и аналитика
-        'apptracer.ru', 'doubleclick.net', 'google-analytics.com',
+        'apptracer.ru',
+        'mytopf.com',
+        'adjust.com',
+        'adjust.cn',
+        'adjust.world',
+        'adjust.net.in',
+        'api2.amplitude.com',
+        'api.eu.amplitude.com',
+        'sr-client-cfg.amplitude.com',
+        'sr-client-cfg.eu.amplitude.com',
+        'api-sr.amplitude.com',
+        'api-sr.eu.amplitude.com',
+        'api-secure.amplitude.com',
+        'doubleclick.net', 'google-analytics.com',
         'top-fwz1.mail.ru', 'counter.yadro.ru', 'data.mail.ru', 'fb.do',
         'tracker-api.vk-analytics.ru', 'appsflyer.com',
         // MAX-телеметрия
@@ -143,6 +205,8 @@
         // Firebase / Google / Crashlytics
         'firebaseinstallations.googleapis.com',
         'firebase-settings.crashlytics.com',
+        'firebaselogging.googleapis.com',
+        'firebaselogging-pa.googleapis.com',
         'app-measurement.com',
         'firebase.googleapis.com',
         'crashlytics.com',
@@ -156,7 +220,6 @@
     // Точные пути. Матч: hostname + pathname начинается с указанной строки
     const BLOCK_PATHS = [
         'vk.com/rkn',
-        'googleapis.com/identitytoolkit',
         'httpbin.org/ip'
     ];
 
@@ -165,15 +228,32 @@
         // Существующие домены
         't.me', 'telegram.org', 'whatsapp.com', 'gosuslugi.ru',
         'main.telegram.org', 'mmg.whatsapp.net', 'gstatic.com', 'calls.okcdn.ru',
-        // Новые домены из отчётов InterSecLab / NTC / The Geek
-        'mtalk.google.com',                     // Google push-сервис
-        'ipv4-internet.yandex.net',             // Яндекс IP-чекер (IPv4)
-        'ipv6-internet.yandex.net',             // Яндекс IP-чекер (IPv6)
-        'pushtrs.push.hicloud.com',             // Huawei push (проверка доступности)
-        'pushtrs1.push.hicloud.com',            // Huawei push (проверка доступности)
-        'token-drcn.push.dbankcloud.com'        // Huawei push (проверка доступности)
+
+        // Домены из исследований сетевого зондирования
+        'mtalk.google.com',
+        'ipv4-internet.yandex.net',
+        'ipv6-internet.yandex.net',
+        'pushtrs.push.hicloud.com',
+        'pushtrs1.push.hicloud.com',
+        'token-drcn.push.dbankcloud.com'
     ];
     // ========================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========================
+    // Получение URL из строки, объекта URL или Request
+        function getRequestUrl(input) {
+        if (typeof input === 'string') return input;
+
+        // Объект URL
+        if (input && typeof input.href === 'string') {
+            return input.href;
+        }
+
+        // Объект Request
+        if (input && typeof input.url === 'string') {
+            return input.url;
+        }
+
+        return '';
+    }
     function shouldBlock(url) {
         if (!url || !CONFIG.BLOCK_FETCH_XHR) return false;
 
@@ -184,10 +264,9 @@
             hostname = urlObj.hostname.toLowerCase();
             pathname = urlObj.pathname.toLowerCase();
         } catch (e) {
-            // Не удалось распарсить — fallback на подстрочный матч
-            const sUrl = String(url).toLowerCase();
-            return BLOCK_DOMAINS.some(d => sUrl.includes(d)) ||
-                   BLOCK_PATHS.some(p => sUrl.includes(p));
+            // Некорректный URL не проверяем по подстрокам,
+            // чтобы избежать ложных срабатываний.
+            return false;
         }
 
         // 1. Проверка доменов (exact или поддомен)
@@ -200,7 +279,7 @@
         // 2. Проверка путей (hostname + pathname)
         const hostPath = hostname + pathname;
         for (const path of BLOCK_PATHS) {
-            if (hostPath.startsWith(path)) {
+            if (hostPath === path || hostPath.startsWith(path + '/')) {
                 return true;
             }
         }
@@ -209,18 +288,37 @@
     }
 
     function shouldBlockProbing(url) {
-        if (!CONFIG.BLOCK_PROBING) return false;
+        if (!CONFIG.BLOCK_PROBING || !url) return false;
+
         let hostname;
+        let pathname;
+
         try {
-            hostname = new URL(url, location.href).hostname.toLowerCase();
+            const urlObj = new URL(url, location.href);
+            hostname = urlObj.hostname.toLowerCase();
+            pathname = urlObj.pathname.toLowerCase();
         } catch (e) {
-            return probingDomains.some(d => String(url).toLowerCase().includes(d));
+            // Некорректный URL не блокируем по подстроке.
+            return false;
         }
+        // Не блокируем API звонков по общему правилу зондирования.
+        if (
+            hostname === 'calls.okcdn.ru' &&
+            pathname === '/fb.do'
+        ) {
+            return false;
+        }
+        // Блокируем все запросы к указанным доменам
+        // и их поддоменам.
         for (const domain of probingDomains) {
-            if (hostname === domain || hostname.endsWith('.' + domain)) {
+            if (
+                hostname === domain ||
+                hostname.endsWith('.' + domain)
+            ) {
                 return true;
             }
         }
+
         return false;
     }
 
@@ -254,7 +352,13 @@
             return false;
         }
 
-        return CONFIG.TELEMETRY_KEYWORDS.some(keyword => str.includes(keyword));
+        return (
+            (CONFIG.BLOCK_VPN_DETECTION &&
+                str.includes('host_reachability')) ||
+            CONFIG.TELEMETRY_KEYWORDS.some(keyword =>
+                str.includes(keyword)
+            )
+        );
     }
 
     // ========================== ПОНЯТНЫЕ НАЗВАНИЯ ДЛЯ ЛОГА ==========================
@@ -347,6 +451,43 @@
     };
 
     // ========================== ЛОГИРОВАНИЕ ==========================
+    // Получаем общую всплывающую подсказку для строк лога
+    function getLogTooltip() {
+        if (!uiShadow) return null;
+
+        let tooltip = uiShadow.getElementById('pm-log-tooltip');
+
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'pm-log-tooltip';
+
+            tooltip.style.cssText = [
+                'position:fixed',
+                'display:none',
+                'opacity:0',
+                'pointer-events:none',
+                'z-index:2147483647',
+                'background:#343f50',
+                'color:#ffffff',
+                'padding:6px 10px',
+                'border-radius:4px',
+                'font-size:10px',
+                'font-family:monospace',
+                'white-space:normal',
+                'width:max-content',
+                'max-width:min(300px, calc(100vw - 16px))',
+                'overflow-wrap:anywhere',
+                'box-sizing:border-box',
+                'border:1px solid rgba(255,255,255,0.15)',
+                'box-shadow:0 4px 12px rgba(0,0,0,0.25)',
+                'transition:opacity 0.2s ease'
+            ].join(';');
+
+            uiShadow.appendChild(tooltip);
+        }
+
+        return tooltip;
+    }
     function addEntryToLog(container, data) {
         const entry = document.createElement('div');
         entry.className = 'pm-log-entry';
@@ -402,15 +543,88 @@
             }
         }
 
-        // 4. Проверяем, обрезается ли текст (для всплывающей подсказки)
-        requestAnimationFrame(() => {
-            if (entry.scrollWidth > entry.clientWidth) {
-                entry.setAttribute('data-tooltip', fullText);
-                entry.style.cursor = 'help';
-            }
+        // Всплывающая подсказка для обрезанных строк лога
+        let tooltipShowTimer = null;
+
+        entry.addEventListener('mouseenter', () => {
+            clearTimeout(tooltipShowTimer);
+
+            tooltipShowTimer = setTimeout(() => {
+                if (!entry.matches(':hover')) return;
+
+                // Проверяем обрезание, когда строка уже видна
+                if (
+                    entry.clientWidth === 0 ||
+                    entry.scrollWidth <= entry.clientWidth
+                ) {
+                    return;
+                }
+
+                const tooltip = getLogTooltip();
+                if (!tooltip) return;
+
+                tooltip.textContent = fullText;
+                tooltip.style.display = 'block';
+                tooltip.style.opacity = '0';
+                tooltip.style.left = '8px';
+                tooltip.style.top = '8px';
+
+                requestAnimationFrame(() => {
+                    if (!entry.matches(':hover')) {
+                        tooltip.style.display = 'none';
+                        return;
+                    }
+
+                    const rect = entry.getBoundingClientRect();
+                    const tipRect = tooltip.getBoundingClientRect();
+                    const margin = 8;
+
+                    const maxLeft = Math.max(
+                        margin,
+                        window.innerWidth - tipRect.width - margin
+                    );
+
+                    const left = Math.max(
+                        margin,
+                        Math.min(rect.left, maxLeft)
+                    );
+
+                    let top = rect.top - tipRect.height - 6;
+
+                    // Если сверху нет места, показываем подсказку снизу
+                    if (top < margin) {
+                        top = rect.bottom + 6;
+                    }
+
+                    // Ограничиваем подсказку границами окна
+                    if (top + tipRect.height > window.innerHeight - margin) {
+                        top = window.innerHeight - tipRect.height - margin;
+                    }
+
+                    tooltip.style.left = `${left}px`;
+                    tooltip.style.top = `${Math.max(margin, top)}px`;
+                    tooltip.style.opacity = '1';
+                });
+            }, 400);
         });
+
+        entry.addEventListener('mouseleave', () => {
+            clearTimeout(tooltipShowTimer);
+
+            const tooltip = getLogTooltip();
+            if (!tooltip) return;
+
+            tooltip.style.opacity = '0';
+
+            setTimeout(() => {
+                if (tooltip.style.opacity === '0') {
+                    tooltip.style.display = 'none';
+                }
+            }, 220);
+        });
+
     }
-    function logBlock(type, url, description) {
+    function logBlock(type, url, description, exportDescription = description) {
         const key = `${type}|${url}`;
         const now = Date.now();
         if (lastRecorded.has(key) && (now - lastRecorded.get(key) < DEDUP_MS)) return;
@@ -426,11 +640,14 @@
 
         const friendlyType = getFriendlyLabel(type);
         const serviceLabel = getServiceLabel(displayUrl);
-        // UI — понятное описание без URL
+        // UI — короткое описание без дополнительных деталей
         const uiText = description || serviceLabel || displayUrl;
-        // Copy log — понятное описание + URL (без query string)
-        // Не дублируем, если displayUrl === uiText
-        const fullText = (displayUrl && displayUrl !== uiText) ? `${uiText} (${displayUrl})` : uiText;
+
+        // Copy log — полное описание + URL (без query string)
+        const exportText = exportDescription || uiText;
+        const fullText = (displayUrl && displayUrl !== exportText)
+            ? `${exportText} (${displayUrl})`
+            : exportText;
 
         const entryData = {
             type: type,
@@ -478,13 +695,30 @@
         pendingLogs.push(entryData);
     }
 
-    // Логирование событий БЕЗ инкремента счётчика
+    // Логирование событий с возможностью учитывать их как блокировки
     // (для мониторинга — например, чтения буфера обмена)
-    function logEvent(type, url, description) {
+    function logEvent(
+        type,
+        url,
+        description,
+        exportDescription = description,
+        forceLog = false,
+        countAsBlocked = false
+    ) {
         const key = `${type}|${url}`;
         const now = Date.now();
-        if (lastRecorded.has(key) && (now - lastRecorded.get(key) < DEDUP_MS)) return;
+        if (
+            !forceLog &&
+            lastRecorded.has(key) &&
+            (now - lastRecorded.get(key) < DEDUP_MS)
+        ) {
+            return;
+        }
+
         lastRecorded.set(key, now);
+        if (countAsBlocked) {
+            blockedCount++;
+        }
 
         const time = new Date().toLocaleTimeString();
         let displayUrl = String(url).split('?')[0];
@@ -496,8 +730,10 @@
         const friendlyType = getFriendlyLabel(type);
         const serviceLabel = getServiceLabel(displayUrl);
         const uiText = description || serviceLabel || displayUrl;
-        const fullText = (displayUrl && displayUrl !== uiText) ? `${uiText} (${displayUrl})` : uiText;
-
+        const exportText = exportDescription || uiText;
+        const fullText = (displayUrl && displayUrl !== exportText)
+            ? `${exportText} (${displayUrl})`
+            : exportText;
         const entryData = {
             type: type,
             url: displayUrl,
@@ -511,13 +747,696 @@
         }
 
         if (uiShadow) {
+            // Обновляем счётчики только для учитываемых блокировок
+            if (countAsBlocked) {
+                const counter = uiShadow.getElementById('pm-counter');
+                const counterExpanded = uiShadow.getElementById('pm-counter-expanded');
+
+                if (counter) counter.innerText = blockedCount;
+                if (counterExpanded) counterExpanded.innerText = blockedCount;
+            }
+
             const logContainer = uiShadow.getElementById('pm-log-list');
+
             if (logContainer) {
                 addEntryToLog(logContainer, entryData);
             }
         }
     }
+    // ========================== ФИЛЬТРАЦИЯ ДИНАМИЧЕСКИХ РЕСУРСОВ ==========================
 
+    // Проверяем URL внешних ресурсов по существующим спискам блокировки.
+    function shouldBlockResource(url) {
+        return (
+            shouldBlock(url) ||
+            (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))
+        );
+    }
+
+    // Блокируем ресурс и записываем событие в журнал.
+    function blockElementResource(element, url, attribute) {
+        if (!url || !shouldBlockResource(url)) return false;
+
+        const tag = String(element.tagName || 'ELEMENT').toLowerCase();
+
+        logBlock(
+            'FETCH',
+            url,
+            `Заблокирован внешний ресурс: ${tag}.${attribute}`
+        );
+
+        try {
+            element.removeAttribute(attribute);
+        } catch (e) {}
+
+        return true;
+    }
+    // Разбираем список URL в srcset с учётом дескрипторов
+    // плотности и ширины изображения.
+    function getSrcsetCandidates(srcset) {
+        const input = String(srcset || '');
+        const urls = [];
+        let pos = 0;
+
+        while (pos < input.length) {
+            // Пропускаем пробелы и разделители.
+            while (
+                pos < input.length &&
+                (/\s/.test(input[pos]) || input[pos] === ',')
+            ) {
+                pos++;
+            }
+
+            if (pos >= input.length) break;
+
+            // URL заканчивается на пробеле.
+            let url = '';
+            while (pos < input.length && !/\s/.test(input[pos])) {
+                url += input[pos++];
+            }
+
+            // Запятая в конце URL завершает вариант без дескриптора.
+            let hasTrailingComma = false;
+            while (url.endsWith(',')) {
+                url = url.slice(0, -1);
+                hasTrailingComma = true;
+            }
+
+            if (url) urls.push(url);
+
+            if (hasTrailingComma) continue;
+
+            // Пропускаем дескриптор до следующей запятой.
+            while (pos < input.length && input[pos] !== ',') {
+                pos++;
+            }
+
+            if (input[pos] === ',') pos++;
+        }
+
+        return urls;
+    }
+
+    // Возвращает первый заблокированный URL из srcset.
+    function findBlockedSrcsetUrl(srcset) {
+        for (const url of getSrcsetCandidates(srcset)) {
+            if (shouldBlockResource(url)) {
+                return url;
+            }
+        }
+
+        return null;
+    }
+
+    // Если хотя бы один вариант заблокирован,
+    // удаляем весь srcset, чтобы браузер не выбрал его.
+    function blockElementSrcset(element, value) {
+        const blockedUrl = findBlockedSrcsetUrl(value);
+
+        if (!blockedUrl) return false;
+
+        logBlock(
+            'FETCH',
+            blockedUrl,
+            'Заблокирован вариант изображения через srcset'
+        );
+
+        try {
+            element.removeAttribute('srcset');
+        } catch (e) {}
+
+       return true;
+    }
+
+    // Перехват свойства srcset у изображений и элементов source.
+    function patchSrcsetProperty(proto) {
+        if (!proto) return;
+
+        const descriptor = Object.getOwnPropertyDescriptor(
+            proto,
+            'srcset'
+        );
+
+        if (
+            !descriptor ||
+            typeof descriptor.set !== 'function' ||
+            !descriptor.configurable
+        ) {
+            return;
+        }
+
+        Object.defineProperty(proto, 'srcset', {
+            configurable: descriptor.configurable,
+            enumerable: descriptor.enumerable,
+            get: descriptor.get,
+            set: function(value) {
+                if (blockElementSrcset(this, value)) return;
+
+                return descriptor.set.call(this, value);
+            }
+        });
+    }
+
+    // Перехватываем программное присваивание src или href.
+    function patchResourceProperty(proto, propertyName, attributeName) {
+        if (!proto) return;
+
+        const descriptor = Object.getOwnPropertyDescriptor(
+            proto,
+            propertyName
+        );
+
+        if (
+            !descriptor ||
+            typeof descriptor.set !== 'function' ||
+            !descriptor.configurable
+        ) {
+            return;
+        }
+
+        Object.defineProperty(proto, propertyName, {
+            configurable: descriptor.configurable,
+            enumerable: descriptor.enumerable,
+            get: descriptor.get,
+            set: function(value) {
+                if (blockElementResource(this, value, attributeName)) {
+                    return;
+                }
+
+                return descriptor.set.call(this, value);
+            }
+        });
+    }
+
+    // Типичные элементы, способные загружать внешние ресурсы.
+    if (CONFIG.BLOCK_FETCH_XHR || CONFIG.BLOCK_PROBING) {
+        patchResourceProperty(
+            HTMLScriptElement.prototype, 'src', 'src'
+        );
+        patchResourceProperty(
+            HTMLImageElement.prototype, 'src', 'src'
+        );
+        // srcset у img и source
+        patchSrcsetProperty(HTMLImageElement.prototype);
+        patchSrcsetProperty(HTMLSourceElement.prototype);
+        patchResourceProperty(
+            HTMLIFrameElement.prototype, 'src', 'src'
+        );
+        patchResourceProperty(
+            HTMLSourceElement.prototype, 'src', 'src'
+        );
+        patchResourceProperty(
+            HTMLMediaElement.prototype, 'src', 'src'
+        );
+        // Прямое присваивание video.poster = URL.
+        if (typeof HTMLVideoElement !== 'undefined') {
+            patchResourceProperty(
+                HTMLVideoElement.prototype, 'poster', 'poster'
+            );
+        }
+        patchResourceProperty(
+            HTMLLinkElement.prototype, 'href', 'href'
+        );
+
+        if (typeof HTMLTrackElement !== 'undefined') {
+            patchResourceProperty(
+                HTMLTrackElement.prototype, 'src', 'src'
+            );
+        }
+
+        if (typeof HTMLEmbedElement !== 'undefined') {
+            patchResourceProperty(
+                HTMLEmbedElement.prototype, 'src', 'src'
+            );
+        }
+
+        if (typeof HTMLObjectElement !== 'undefined') {
+            patchResourceProperty(
+                HTMLObjectElement.prototype, 'data', 'data'
+            );
+        }
+
+        // Дополнительно перехватываем setAttribute(),
+        // которым также задают адрес внешнего ресурса.
+        const originalSetAttribute = Element.prototype.setAttribute;
+
+        const resourceTags = new Set([
+            'SCRIPT',
+            'IMG',
+            'IFRAME',
+            'SOURCE',
+            'AUDIO',
+            'VIDEO',
+            'TRACK',
+            'EMBED'
+        ]);
+
+        Element.prototype.setAttribute = function(name, value) {
+            const attr = String(name).toLowerCase();
+            const tag = String(this.tagName || '').toUpperCase();
+            // Фильтруем внешние ресурсы в inline CSS.
+                if (attr === 'style' && typeof value === 'string') {
+                    const sanitizedStyle = sanitizeCssUrls(value);
+
+                    if (sanitizedStyle !== value) {
+                        return originalSetAttribute.call(
+                            this,
+                            name,
+                            sanitizedStyle
+                        );
+                    }
+                }
+            // Проверяем варианты URL в srcset.
+            if (
+                attr === 'srcset' &&
+                (tag === 'IMG' || tag === 'SOURCE') &&
+                blockElementSrcset(this, value)
+            ) {
+                return;
+            }
+
+            const isResourceAttribute =
+                (attr === 'src' && resourceTags.has(tag)) ||
+                (attr === 'href' && tag === 'LINK') ||
+                (attr === 'data' && tag === 'OBJECT') ||
+                (attr === 'poster' && tag === 'VIDEO');
+
+            if (
+                isResourceAttribute &&
+                blockElementResource(this, value, attr)
+            ) {
+                return;
+            }
+
+            return originalSetAttribute.apply(this, arguments);
+        };
+
+        makeNative(Element.prototype, 'setAttribute');
+        // ========================== ДИНАМИЧЕСКИЙ HTML ==========================
+
+        // Элементы, для которых стандартный разбор HTML имеет
+        // особые правила. Их оставляем нативному обработчику.
+        const dynamicHTMLSkipTags = new Set([
+            'TEMPLATE', 'SCRIPT', 'STYLE', 'TEXTAREA', 'TITLE',
+            'NOSCRIPT', 'XMP', 'PLAINTEXT', 'IFRAME', 'NOEMBED',
+            'NOFRAMES', 'TABLE', 'TBODY', 'THEAD', 'TFOOT',
+            'TR', 'COLGROUP', 'SELECT', 'OPTGROUP', 'OPTION'
+        ]);
+        // Фильтрация внешних ресурсов внутри CSS url(...) и @import.
+        function sanitizeCssUrls(cssText) {
+            let css = String(cssText || '');
+
+            if (!/url\s*\(|@import\s+/i.test(css)) {
+                return css;
+            }
+
+            // CSS url("..."), url('...') и url(...)
+            css = css.replace(
+                /url\(\s*(?:(["'])(.*?)\1|([^)]*?))\s*\)/gi,
+                (match, quote, quotedUrl, rawUrl) => {
+                    const resourceUrl = (
+                        quote ? quotedUrl : (rawUrl || '')
+                    ).trim();
+
+                    if (!resourceUrl || !shouldBlockResource(resourceUrl)) {
+                        return match;
+                    }
+
+                    logBlock(
+                        'FETCH',
+                        resourceUrl,
+                        'Заблокирован внешний CSS-ресурс'
+                    );
+
+                    // Заменяем заблокированный адрес пустым ресурсом,
+                    // чтобы исключить исходящий запрос к нему.
+                    return 'url("data:,")';
+                }
+            );
+
+            // Прямая форма @import "https://example.com/style.css"
+            css = css.replace(
+                /(@import\s+)(["'])([^"']+)\2/gi,
+                (match, prefix, quote, resourceUrl) => {
+                    const url = resourceUrl.trim();
+
+                    if (!url || !shouldBlockResource(url)) {
+                        return match;
+                    }
+
+                    logBlock(
+                        'FETCH',
+                        url,
+                        'Заблокирован внешний CSS-импорт'
+                    );
+
+                    return prefix + 'url("data:,")';
+                }
+            );
+
+            return css;
+        }
+
+        function canFilterDynamicHTML(element, position) {
+            if (
+                !element ||
+                element.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+            ) {
+                return false;
+            }
+
+            const pos = String(position || '').toLowerCase();
+            let context = element;
+
+            if (pos === 'beforebegin' || pos === 'afterend') {
+                context = element.parentElement;
+                if (!context) return false;
+            }
+
+            return (
+                context.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+                !dynamicHTMLSkipTags.has(
+                    String(context.tagName).toUpperCase()
+                )
+            );
+        }
+
+        // Удаляем из подготовленного фрагмента только ресурсы,
+        // адреса которых совпали с существующими правилами.
+        function sanitizeResourceFragment(fragment) {
+            if (!fragment || !fragment.querySelectorAll) return;
+
+            const elements = fragment.querySelectorAll('*');
+
+            for (const element of elements) {
+                const tag = String(element.tagName || '').toUpperCase();
+                // CSS внутри тега <style>.
+                        if (tag === 'STYLE') {
+                            const originalCss = element.textContent || '';
+                            const sanitizedCss = sanitizeCssUrls(originalCss);
+
+                            if (sanitizedCss !== originalCss) {
+                                element.textContent = sanitizedCss;
+                            }
+                        }
+
+                        // CSS внутри атрибута style.
+                        if (element.hasAttribute('style')) {
+                            const originalStyle = element.getAttribute('style') || '';
+                            const sanitizedStyle = sanitizeCssUrls(originalStyle);
+
+                            if (sanitizedStyle !== originalStyle) {
+                                element.setAttribute('style', sanitizedStyle);
+                            }
+                        }
+
+                // src у элементов, загружающих внешние ресурсы.
+                if (
+                    [
+                        'SCRIPT', 'IMG', 'IFRAME', 'SOURCE',
+                        'AUDIO', 'VIDEO', 'TRACK', 'EMBED'
+                    ].includes(tag) &&
+                    element.hasAttribute('src')
+                ) {
+                    blockElementResource(
+                        element,
+                        element.getAttribute('src'),
+                        'src'
+                    );
+                }
+
+                // Варианты изображений.
+                if (
+                    (tag === 'IMG' || tag === 'SOURCE') &&
+                    element.hasAttribute('srcset')
+                ) {
+                    blockElementSrcset(
+                        element,
+                        element.getAttribute('srcset')
+                    );
+                }
+
+                // Внешние таблицы стилей и другие ресурсы link.
+                if (tag === 'LINK' && element.hasAttribute('href')) {
+                    blockElementResource(
+                        element,
+                        element.getAttribute('href'),
+                        'href'
+                    );
+                }
+
+                // Постер видео.
+                if (tag === 'VIDEO' && element.hasAttribute('poster')) {
+                    blockElementResource(
+                        element,
+                        element.getAttribute('poster'),
+                        'poster'
+                    );
+                }
+
+                // Внешний ресурс object.
+                if (tag === 'OBJECT' && element.hasAttribute('data')) {
+                    blockElementResource(
+                        element,
+                        element.getAttribute('data'),
+                        'data'
+                    );
+                }
+
+                // Внешние ссылки SVG image/use.
+                const localName = String(element.localName || '').toLowerCase();
+
+                if (
+                    element.namespaceURI !== 'http://www.w3.org/1999/xhtml' &&
+                    (localName === 'image' || localName === 'use')
+                ) {
+                    for (const attribute of ['href', 'xlink:href']) {
+                        const value = element.getAttribute(attribute);
+
+                        if (value && shouldBlockResource(value)) {
+                            logBlock(
+                                'FETCH',
+                                value,
+                                'Заблокирован внешний ресурс SVG'
+                            );
+                            element.removeAttribute(attribute);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Разбор во временном template не запускает найденные
+        // ресурсы до их проверки.
+        const nativeInnerHTMLDescriptor =
+            Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+
+        function sanitizeResourceHTML(html) {
+            const template = document.createElement('template');
+
+            nativeInnerHTMLDescriptor.set.call(template, html);
+            sanitizeResourceFragment(template.content);
+
+            return nativeInnerHTMLDescriptor.get.call(template);
+        }
+
+        // Перехват innerHTML.
+        if (
+            nativeInnerHTMLDescriptor &&
+            nativeInnerHTMLDescriptor.get &&
+            nativeInnerHTMLDescriptor.set &&
+            nativeInnerHTMLDescriptor.configurable
+        ) {
+            Object.defineProperty(Element.prototype, 'innerHTML', {
+                configurable: nativeInnerHTMLDescriptor.configurable,
+                enumerable: nativeInnerHTMLDescriptor.enumerable,
+                get: nativeInnerHTMLDescriptor.get,
+
+                set: function(value) {
+                    if (
+                        typeof value !== 'string' ||
+                        !canFilterDynamicHTML(this)
+                    ) {
+                        return nativeInnerHTMLDescriptor.set.call(this, value);
+                    }
+
+                    let sanitizedHTML;
+
+                    try {
+                        sanitizedHTML = sanitizeResourceHTML(value);
+                    } catch (e) {
+                        // При ошибке сохраняем штатное поведение браузера.
+                        return nativeInnerHTMLDescriptor.set.call(this, value);
+                    }
+
+                    return nativeInnerHTMLDescriptor.set.call(
+                        this,
+                        sanitizedHTML
+                    );
+                }
+            });
+        }
+
+        // Перехват insertAdjacentHTML.
+        const nativeInsertAdjacentHTML = Element.prototype.insertAdjacentHTML;
+
+        if (typeof nativeInsertAdjacentHTML === 'function') {
+            Element.prototype.insertAdjacentHTML = function(position, value) {
+                const pos = String(position).toLowerCase();
+
+                if (
+                    typeof value !== 'string' ||
+                    !['beforebegin', 'afterbegin', 'beforeend', 'afterend'].includes(pos) ||
+                    !canFilterDynamicHTML(this, pos)
+                ) {
+                    return nativeInsertAdjacentHTML.apply(this, arguments);
+                }
+
+                let sanitizedHTML;
+
+                try {
+                    sanitizedHTML = sanitizeResourceHTML(value);
+                } catch (e) {
+                    return nativeInsertAdjacentHTML.apply(this, arguments);
+                }
+
+                return nativeInsertAdjacentHTML.call(
+                    this,
+                    position,
+                    sanitizedHTML
+                );
+            };
+
+            makeNative(Element.prototype, 'insertAdjacentHTML');
+        }
+        // ========================== CSSOM: ДИНАМИЧЕСКИЙ CSS ==========================
+
+        // Перехватываем CSSStyleDeclaration.setProperty().
+        if (window.CSSStyleDeclaration) {
+            const cssProto = CSSStyleDeclaration.prototype;
+
+            const originalSetProperty = cssProto.setProperty;
+            if (typeof originalSetProperty === 'function') {
+                cssProto.setProperty = function(name, value, priority) {
+                    const safeValue = sanitizeCssUrls(value);
+                    return originalSetProperty.call(
+                        this,
+                        name,
+                        safeValue,
+                        priority
+                    );
+                };
+
+                makeNative(cssProto, 'setProperty');
+            }
+
+            // Перехватываем cssText.
+            const cssTextDescriptor =
+                Object.getOwnPropertyDescriptor(cssProto, 'cssText');
+
+            if (
+                cssTextDescriptor &&
+                cssTextDescriptor.set &&
+                cssTextDescriptor.configurable
+            ) {
+                Object.defineProperty(cssProto, 'cssText', {
+                    configurable: cssTextDescriptor.configurable,
+                    enumerable: cssTextDescriptor.enumerable,
+                    get: cssTextDescriptor.get,
+
+                    set: function(value) {
+                        return cssTextDescriptor.set.call(
+                            this,
+                            sanitizeCssUrls(value)
+                        );
+                    }
+                });
+            }
+
+            // Перехватываем распространённые свойства CSS,
+            // в значениях которых могут встречаться url(...).
+            const cssUrlProperties = [
+                'background',
+                'backgroundImage',
+                'borderImage',
+                'borderImageSource',
+                'listStyle',
+                'listStyleImage',
+                'cursor',
+                'content',
+                'filter',
+                'clipPath',
+                'mask',
+                'maskImage',
+                'maskBorder',
+                'maskBorderSource',
+                'shapeOutside',
+                'offsetPath',
+                'fill',
+                'stroke',
+                'marker',
+                'markerStart',
+                'markerMid',
+                'markerEnd'
+            ];
+
+            for (const property of cssUrlProperties) {
+                const descriptor =
+                    Object.getOwnPropertyDescriptor(cssProto, property);
+
+                if (
+                    !descriptor ||
+                    typeof descriptor.set !== 'function' ||
+                    !descriptor.configurable
+                ) {
+                    continue;
+                }
+
+                Object.defineProperty(cssProto, property, {
+                    configurable: descriptor.configurable,
+                    enumerable: descriptor.enumerable,
+                    get: descriptor.get,
+
+                    set: function(value) {
+                        return descriptor.set.call(
+                            this,
+                            sanitizeCssUrls(value)
+                        );
+                    }
+                });
+            }
+        }
+
+        // Перехват динамического добавления CSS-правил.
+        function patchCssRuleMethod(proto, methodName) {
+            if (!proto) return;
+
+            const original = proto[methodName];
+            if (typeof original !== 'function') return;
+
+            proto[methodName] = function(ruleText) {
+                const args = Array.from(arguments);
+
+                if (typeof args[0] === 'string') {
+                    args[0] = sanitizeCssUrls(args[0]);
+                }
+
+                return original.apply(this, args);
+            };
+
+            makeNative(proto, methodName);
+        }
+
+        if (window.CSSStyleSheet) {
+            patchCssRuleMethod(CSSStyleSheet.prototype, 'insertRule');
+            patchCssRuleMethod(CSSStyleSheet.prototype, 'replace');
+            patchCssRuleMethod(CSSStyleSheet.prototype, 'replaceSync');
+        }
+
+        if (window.CSSGroupingRule) {
+            patchCssRuleMethod(CSSGroupingRule.prototype, 'insertRule');
+        }
+    }
     // ========================== НОВЫЕ ЗАЩИТЫ ==========================
     // ========================== ОТКЛЮЧЕНИЕ ЗВУКОВ ==========================
     if (CONFIG.MUTE_SOUNDS) {
@@ -685,7 +1604,7 @@
     }
 
     // 5. Защита от зондирования (блокировка проверки доступности t.me, whatsapp.com и др.)
-    // ========================== [1.9] НОВЫЕ МОДУЛИ ==========================
+    // ========================== НОВЫЕ МОДУЛИ ==========================
     // 5c. [1.9] Маскировка типа сети и кода оператора
     if (CONFIG.HIDE_NETWORK_TYPE_DETAILS && 'connection' in navigator) {
         const conn = navigator.connection;
@@ -700,49 +1619,6 @@
                 Object.defineProperty(conn, 'onchange', { get: () => null, configurable: true });
             } catch(e) {}
         }
-    }
-
-    if (CONFIG.BLOCK_PROBING) {
-        // Перехват fetch
-        const origFetch = window.fetch;
-        window.fetch = function(input, init) {
-            const url = typeof input === 'string' ? input : (input && input.url) || '';
-            if (shouldBlockProbing(url)) {
-                logBlock('PROBE', url);
-                return Promise.reject(new TypeError('Network request failed (Blinder)'));
-            }
-            return origFetch.apply(this, arguments);
-        };
-        Object.defineProperty(window.fetch, 'length', { value: 1 });
-        makeNative(window, 'fetch');
-
-        // Перехват XHR для probing (дополнительно)
-        const origOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function(method, url) {
-            this._url = url;
-            this._isProbe = shouldBlockProbing(url);
-            return origOpen.apply(this, arguments);
-        };
-        Object.defineProperty(XMLHttpRequest.prototype.open, 'length', { value: origOpen.length });
-        const origSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.send = function(body) {
-            if (this._isProbe) {
-                logBlock('PROBE', this._url);
-                // Имитируем ошибку сети, чтобы сайт не ждал ответа
-                setTimeout(() => {
-                    Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
-                    Object.defineProperty(this, 'status', { value: 0, configurable: true });
-                    Object.defineProperty(this, 'statusText', { value: 'Network error', configurable: true });
-                    this.dispatchEvent(new Event('readystatechange'));
-                    this.dispatchEvent(new Event('error'));
-                    this.dispatchEvent(new Event('loadend'));
-                }, 1);
-                return;
-            }
-            return origSend.apply(this, arguments);
-        };
-        makeNative(XMLHttpRequest.prototype, 'open');
-        makeNative(XMLHttpRequest.prototype, 'send');
     }
 
     // ========================== ОСТАЛЬНЫЕ МОДУЛИ ==========================
@@ -804,11 +1680,11 @@
     }
 
     // ========================== СЕТЕВЫЕ ПЕРЕХВАТЫ (основные) ==========================
-    if (CONFIG.BLOCK_FETCH_XHR) {
+    if (CONFIG.BLOCK_FETCH_XHR || CONFIG.BLOCK_PROBING) {
         // fetch (уже переопределён выше для probing, но добавим блокировку по чёрному списку)
         const origFetch2 = window.fetch;
         window.fetch = function(input, init) {
-            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const url = getRequestUrl(input);
 
             // 1. Блокировка по URL
             if (shouldBlock(url)) {
@@ -820,14 +1696,78 @@
                 return Promise.reject(new TypeError('Network request failed (Blinder)'));
             }
 
-            // 2. Анализ тела POST-запросов (раньше был только для XHR)
-            if (CONFIG.INSPECT_POST_PAYLOAD) {
-                const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+            // 2. Анализ тела POST-запросов
+            if (CONFIG.BLOCK_FETCH_XHR && CONFIG.INSPECT_POST_PAYLOAD) {
+                const method = (
+                    (init && init.method) ||
+                    (input && input.method) ||
+                    'GET'
+                ).toUpperCase();
+
                 if (method === 'POST') {
                     const body = init && init.body;
+
+                    // Проверяем тело, переданное через init.body
                     if (body && hasTelemetryInPayload(body)) {
                         logBlock('POST-TELE', url);
-                        return Promise.resolve(new Response('{"status":"ok"}', { status: 200 }));
+                        return Promise.resolve(
+                            new Response('{"status":"ok"}', { status: 200 })
+                        );
+                    }
+
+                    // Если тело не переопределено через init,
+                    // проверяем JSON внутри исходного объекта Request
+                    const hasCustomBody = init && init.body !== undefined;
+
+                    if (
+                        !hasCustomBody &&
+                        typeof Request !== 'undefined' &&
+                        input instanceof Request &&
+                        input.body
+                    ) {
+                        const contentType =
+                            input.headers.get('content-type') || '';
+
+                        // Анализируем только JSON, включая application/*+json
+                        if (/application\/(?:[a-z0-9.+-]+\+)?json\b/i.test(contentType)) {
+                            let bodyPromise;
+
+                            try {
+                                bodyPromise = input.clone().text();
+                            } catch (e) {
+                                bodyPromise = null;
+                            }
+
+                            if (bodyPromise) {
+                                const fetchThis = this;
+                                const fetchArgs = arguments;
+
+                                return bodyPromise.then(
+                                    requestBody => {
+                                        if (hasTelemetryInPayload(requestBody)) {
+                                            logBlock('POST-TELE', url);
+                                            return new Response(
+                                                '{"status":"ok"}',
+                                                { status: 200 }
+                                            );
+                                        }
+
+                                        return origFetch2.apply(
+                                            fetchThis,
+                                            fetchArgs
+                                        );
+                                    },
+                                    () => {
+                                        // Если прочитать копию не удалось,
+                                        // не блокируем исходный запрос
+                                        return origFetch2.apply(
+                                            fetchThis,
+                                            fetchArgs
+                                        );
+                                    }
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -879,7 +1819,12 @@
                 }, 1);
                 return;
             }
-            if (this._method === 'POST' && body && hasTelemetryInPayload(body)) {
+            if (
+                CONFIG.BLOCK_FETCH_XHR &&
+                this._method === 'POST' &&
+                body &&
+                hasTelemetryInPayload(body)
+            ) {
                 logBlock('POST-TELE', this._url);
                 setTimeout(() => {
                     Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
@@ -899,6 +1844,30 @@
             return origSendXHR.apply(this, arguments);
         };
         makeNative(XMLHttpRequest.prototype, 'send');
+    }
+    // ========================== ОБРАБОТКА БИНАРНЫХ КАДРОВ MAX ==========================
+
+    function getMaxWebSocketBytes(data) {
+        try {
+            // ArrayBuffer
+            if (
+                Object.prototype.toString.call(data) ===
+                '[object ArrayBuffer]'
+            ) {
+                return new Uint8Array(data);
+            }
+
+            // TypedArray, DataView и другие ArrayBufferView
+            if (ArrayBuffer.isView(data)) {
+                return new Uint8Array(
+                    data.buffer,
+                    data.byteOffset,
+                    data.byteLength
+                );
+            }
+        } catch (e) {}
+
+        return null;
     }
 
     // ========================== WEBSOCKET ФИЛЬТРАЦИЯ ==========================
@@ -941,59 +1910,328 @@
     });
     makeNative(window, 'WebSocket');
     const origWSSend = WebSocket.prototype.send;
+
     WebSocket.prototype.send = function(data) {
+            const isMaxWebSocket =
+                    typeof this.url === 'string' && this.url.includes('api.oneme.ru');
+
+                // Диагностика Blob в исходящих кадрах: binaryType влияет на входящие
+                // сообщения и сам по себе не меняет тип аргумента send().
+                if (
+                                isMaxWebSocket &&
+                    !warnedBlobWebSocketSend &&
+                    typeof Blob !== 'undefined' &&
+                    data instanceof Blob
+                ) {
+                    warnedBlobWebSocketSend = true;
+                    console.warn(
+                        '[MAX Blinder] WebSocket.send() получил Blob. ' +
+                        'Бинарные фильтры opcode 5/50/65 не могут синхронно разобрать этот кадр.',
+                        { size: data.size, type: data.type }
+                    );
+                }
+
+                // Если структура похожа на известный бинарный формат MAX, но версия
+                // отличается, предупреждаем один раз и не пытаемся блокировать кадр.
+                if (isMaxWebSocket && !warnedUnknownMaxProtocolVersion) {
+                    const frameBytes = getMaxWebSocketBytes(data);
+                    if (
+                        frameBytes &&
+                        frameBytes.length >= 10 &&
+                        frameBytes[1] === 0x00 &&
+                        frameBytes[4] === 0x00 &&
+                        [0x05, 0x32, 0x41].includes(frameBytes[5]) &&
+                        frameBytes[0] !== MAX_PROTOCOL_VERSION
+                    ) {
+                        warnedUnknownMaxProtocolVersion = true;
+                        console.warn(
+                            '[MAX Blinder] Обнаружен бинарный кадр, похожий на формат MAX, ' +
+                            'с неизвестной версией протокола. Кадр пропущен без анализа.',
+                            {
+                                version: frameBytes[0],
+                                opcode: frameBytes[5]
+                            }
+                        );
+                    }
+                }
+        // Блокировка бинарной телеметрии opcode 5 с локальной имитацией ACK.
+        if (CONFIG.BLOCK_WEBSOCKET_OPCODE5) {
+            try {
+                const bytes = getMaxWebSocketBytes(data);
+
+                if (
+                    bytes &&
+                    bytes.length >= 10 &&
+                    bytes[0] === MAX_PROTOCOL_VERSION &&
+                    bytes[1] === 0x00 &&
+                    bytes[4] === 0x00 &&
+                    bytes[5] === 0x05
+                ) {
+                    // packed_len: старший байт содержит флаги,
+                    // младшие три байта — длину полезной нагрузки.
+                    const payloadLength =
+                        ((bytes[7] << 16) |
+                         (bytes[8] << 8) |
+                         bytes[9]) >>> 0;
+
+                    // Обрабатываем только кадры с корректной длиной.
+                    if (payloadLength === bytes.length - 10) {
+                        const socket = this;
+
+                        logEvent(
+                            'WS-TELE',
+                            '',
+                            'Бинарная аналитика',
+                            'Бинарная аналитика (opcode 5)',
+                            false,
+                            true
+                        );
+
+                        // Локальный ACK повторяет ответ сервера:
+                        // тот же seq и opcode 5.
+                        const ackBytes = new Uint8Array([
+                            MAX_PROTOCOL_VERSION,
+                            0x01,
+                            bytes[2],
+                            bytes[3],
+                            0x00,
+                            0x05,
+                            0x00, 0x00, 0x00, 0x00
+                        ]);
+
+                        const ackData = socket.binaryType === 'blob'
+                            ? new Blob([ackBytes], {
+                                type: 'application/octet-stream'
+                            })
+                            : ackBytes.buffer;
+
+                        setTimeout(() => {
+                            try {
+                                if (socket.readyState === 1) {
+                                    socket.dispatchEvent(
+                                        new MessageEvent('message', {
+                                            data: ackData,
+                                            origin: location.origin
+                                        })
+                                    );
+                                }
+                            } catch (e) {}
+                        }, 0);
+
+                        // Настоящий телеметрийный кадр не отправляем.
+                        return;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // Блокировка бинарного индикатора набора текста (opcode 65)
+        if (CONFIG.HIDE_TYPING) {
+            try {
+                const bytes = getMaxWebSocketBytes(data);
+
+                if (
+                    bytes &&
+                    bytes.length >= 10 &&
+                    bytes[0] === MAX_PROTOCOL_VERSION &&
+                    bytes[1] === 0x00 &&
+                    bytes[4] === 0x00 &&
+                    bytes[5] === 0x41
+                ) {
+                    // packed_len: старший байт содержит флаги,
+                    // младшие три байта — длину полезной нагрузки.
+                    const payloadLength =
+                        ((bytes[7] << 16) |
+                         (bytes[8] << 8) |
+                         bytes[9]) >>> 0;
+
+                    if (payloadLength === bytes.length - 10) {
+
+                        logEvent(
+                            'STATUS',
+                            '',
+                            'Индикатор набора текста',
+                            'Индикатор набора текста (opcode 65)',
+                            true,
+                            true
+                        );
+
+                        // Формируем локальный ACK с исходным seq
+                        const socket = this;
+
+                        const ackBytes = new Uint8Array([
+                            MAX_PROTOCOL_VERSION,
+                            0x01,
+                            bytes[2],
+                            bytes[3],
+                            0x00, 0x41,
+                            0x00, 0x00, 0x00, 0x00
+                        ]);
+
+                        const ackData = socket.binaryType === 'blob'
+                            ? new Blob([ackBytes], {
+                                type: 'application/octet-stream'
+                            })
+                            : ackBytes.buffer;
+
+                        setTimeout(() => {
+                            try {
+                                if (socket.readyState === 1) {
+                                    socket.dispatchEvent(
+                                        new MessageEvent('message', {
+                                            data: ackData,
+                                            origin: location.origin
+                                        })
+                                    );
+                                }
+                            } catch (e) {}
+                        }, 0);
+
+                        return;
+                    }
+                }
+            } catch (e) {}
+        }
+        // Блокировка уведомлений о прочтении (CHAT_READ, opcode 50)
+        if (CONFIG.HIDE_READ_RECEIPTS) {
+            try {
+                const bytes = getMaxWebSocketBytes(data);
+
+                // MessagePack-представление поля:
+                // type: READ_MESSAGE
+                const marker = new Uint8Array([
+                    0xA4,                   // Длина ключа: 4
+                    0x74, 0x79, 0x70, 0x65, // "type"
+                    0xAC,                   // Длина значения: 12
+                    0x52, 0x45, 0x41, 0x44, // READ
+                    0x5F,                   // _
+                    0x4D, 0x45, 0x53, 0x53, // MESS
+                    0x41, 0x47, 0x45        // AGE
+                ]);
+
+                if (
+                    bytes &&
+                    bytes.length >= 10 + marker.length &&
+                    bytes[0] === MAX_PROTOCOL_VERSION &&
+                    bytes[1] === 0x00 &&
+                    bytes[4] === 0x00 &&
+                    bytes[5] === 0x32
+                ) {
+                    // Старший байт packed_len — флаги,
+                    // младшие три байта — длина payload.
+                    const payloadLength =
+                        ((bytes[7] << 16) |
+                         (bytes[8] << 8) |
+                         bytes[9]) >>> 0;
+
+                    if (payloadLength === bytes.length - 10) {
+
+                        // Ищем точное MessagePack-представление
+                        // поля type: READ_MESSAGE.
+                        let isReadMessage = false;
+
+                        for (
+                            let i = 10;
+                            i <= bytes.length - marker.length;
+                            i++
+                        ) {
+                            let match = true;
+
+                            for (let j = 0; j < marker.length; j++) {
+                                if (bytes[i + j] !== marker[j]) {
+                                    match = false;
+                                    break;
+                                }
+                            }
+
+                            if (match) {
+                                isReadMessage = true;
+                                break;
+                            }
+                        }
+
+                        if (isReadMessage) {
+                            logEvent(
+                                'STATUS',
+                                '',
+                                'Отметка о прочтении',
+                                'Отметка о прочтении (opcode 50)',
+                                true,
+                                true
+                            );
+
+                            // Исходный запрос не отправляем серверу.
+                            // Искусственный ACK пока не формируем.
+                            return;
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // Существующая обработка JSON-сообщений
         if (typeof data === 'string' && data.includes('"opcode"')) {
             try {
                 const msg = JSON.parse(data);
                 const opcode = msg.opcode;
 
-                // Перехват и скрытие статусов (работает всегда, если включены галочки)
-                if (CONFIG.HIDE_READ_RECEIPTS && opcode === 50) {
-                    logEvent('STATUS', '', 'Скрыт статус "Прочитано"');
-                    return;
-                }
-                if (CONFIG.HIDE_TYPING && opcode === 65) {
-                    logEvent('STATUS', '', 'Скрыт статус "Печатает"');
+                if (
+                    CONFIG.HIDE_READ_RECEIPTS &&
+                    opcode === 50 &&
+                    msg.payload &&
+                    msg.payload.type === 'READ_MESSAGE'
+                ) {
+                    logEvent(
+                        'STATUS',
+                        '',
+                        'Заблокирована отметка о прочтении',
+                        'Заблокирована отметка о прочтении (opcode 50)',
+                        true,
+                        true
+                    );
                     return;
                 }
 
-                // Существующая блокировка телеметрии (теперь внутри проверки)
-                if (CONFIG.BLOCK_WEBSOCKET_OPCODE5 && CONFIG.BLOCKED_OPCODES.includes(opcode)) {
-                    logBlock('WS-TELE', '', 'Заблокирована аналитика');
-                    return;
-                }
-                // Дополнительная проверка на GET_HOST_REACHABILITY
-                if (CONFIG.BLOCK_WEBSOCKET_OPCODE5 && opcode === 5 &&
-                    msg.payload &&
-                    msg.payload.events &&
-                    Array.isArray(msg.payload.events) &&
-                    msg.payload.events.some(e => e.event === 'GET_HOST_REACHABILITY')) {
-                    logBlock('WS-TELE', '', 'Заблокирована проверка сети');
-                    return;
-                }
-                // [1.9] Расширенная проверка HOST_REACHABILITY по любому опкоду
-                if (CONFIG.BLOCK_WEBSOCKET_OPCODE5 &&
-                    msg.payload &&
-                    msg.payload.events &&
-                    Array.isArray(msg.payload.events) &&
-                    msg.payload.events.some(e => e.event && e.event.includes('HOST_REACHABILITY'))) {
-                    logBlock('WS-TELE', '', 'Заблокирована проверка сети');
+                if (CONFIG.HIDE_TYPING && opcode === 65) {
+                    logEvent('STATUS', '', 'Скрыт статус "Печатаю"');
                     return;
                 }
             } catch (e) {}
         }
+
         return origWSSend.apply(this, arguments);
     };
+
     makeNative(WebSocket.prototype, 'send');
     // ========================== BEACON ==========================
     if (CONFIG.BLOCK_BEACON && window.Navigator) {
         const origBeacon = Navigator.prototype.sendBeacon;
         if (origBeacon) {
             const customBeacon = function(url, data) {
-                if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
+                // 1. Блокировка по адресу
+                if (
+                    shouldBlock(url) ||
+                    (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))
+                ) {
                     logBlock('BEACON', url);
                     return true;
+               }
+
+                // 2. Проверка содержимого на признаки телеметрии
+                if (
+                    CONFIG.INSPECT_POST_PAYLOAD &&
+                    data &&
+                    hasTelemetryInPayload(data)
+                ) {
+                    logBlock(
+                        'BEACON',
+                        url,
+                        'Заблокирована телеметрия через sendBeacon'
+                    );
+                    return true;
                 }
+
+                // 3. Остальные запросы передаём браузеру
                 return origBeacon.apply(this, arguments);
             };
             // Скрываем длину функции (нативный sendBeacon имеет length = 2, наш тоже, но на всякий случай)
@@ -1009,15 +2247,31 @@
     if (CONFIG.IFRAME_PROTECTION) {
         const origCreateElement = document.createElement;
         const origOpen = window.open;
+        // Не устанавливаем сетевые перехватчики повторно
+        // в одном и том же документе iframe.
+        const protectedIframeDocuments = new WeakSet();
 
         function protectIframe(iframe) {
             try {
-                if (!iframe.contentWindow) return;
+                if (!iframe || !iframe.contentWindow) return;
+
                 const win = iframe.contentWindow;
-                if (CONFIG.BLOCK_FETCH_XHR) {
+
+                // Доступ к document также проверяет same-origin.
+                // После навигации документ может измениться,
+                // даже если элемент iframe остался тем же.
+                const iframeDocument = win.document;
+
+                if (
+                    !iframeDocument ||
+                    protectedIframeDocuments.has(iframeDocument)
+                ) {
+                    return;
+                }
+                if (CONFIG.BLOCK_FETCH_XHR || CONFIG.BLOCK_PROBING) {
                     win.fetch = new Proxy(win.fetch, {
                         apply(target, thisArg, args) {
-                            const url = typeof args[0] === 'object' ? args[0].url : args[0];
+                            const url = getRequestUrl(args[0]);
                             if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
                                 logBlock('FETCH (iframe)', url);
                                 return Promise.resolve(new Response('{"status":"ok"}', { status: 200 }));
@@ -1054,6 +2308,7 @@
                         return origISend.apply(this, arguments);
                     };
                 }
+                protectedIframeDocuments.add(iframeDocument);
             } catch (e) { /* cross-origin — игнорируем */ }
         }
 
@@ -1076,7 +2331,7 @@
                         if (CONFIG.BLOCK_FETCH_XHR && newWindow.fetch) {
                             newWindow.fetch = new Proxy(newWindow.fetch, {
                                 apply(target, thisArg, args) {
-                                    const url = typeof args[0] === 'object' ? args[0].url : args[0];
+                                    const url = getRequestUrl(args[0]);
                                     if (shouldBlock(url) || (CONFIG.BLOCK_PROBING && shouldBlockProbing(url))) {
                                         logBlock('FETCH (popup)', url);
                                         return Promise.resolve(new Response('{"status":"ok"}', { status: 200 }));
@@ -1107,7 +2362,6 @@
         });
             observer.observe(document, { childList: true, subtree: true });
         }
-    // ================================================================
 
     try {
         // Улучшенные аппаратные характеристики (теперь в прототипе и с configurable)
@@ -1127,69 +2381,149 @@
             };
             makeNative(HTMLCanvasElement.prototype, 'getContext');
             const orgGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-            // Кэш: canvas → Uint8Array (чтобы один и тот же холст давал один и тот же шум)
+
+            // Кэш: canvas → стабильный шаблон шума
             const canvasNoiseCache = new WeakMap();
 
-            CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
-                const imageData = orgGetImageData.call(this, x, y, w, h);
+            // Применение шума к данным Canvas
+            function applyCanvasNoise(imageData, canvas) {
                 const data = imageData.data;
+
                 if (data.length > 0) {
-                    const canvas = this.canvas;
                     let noisePattern = canvasNoiseCache.get(canvas);
+
                     if (!noisePattern) {
-                        // Генерируем шум один раз на холст
-                        noisePattern = new Uint8Array(256);
-                        const rnd = makeSeededRandom(FINGERPRINT_SEED + (canvas.width * 31 + canvas.height));
+                        noisePattern = new Int8Array(256);
+
+                        const rnd = makeSeededRandom(
+                            FINGERPRINT_SEED + (canvas.width * 31 + canvas.height)
+                        );
+
                         for (let i = 0; i < 256; i++) {
-                            noisePattern[i] = Math.floor(rnd() * 3) - 1; // -1, 0, +1
+                            noisePattern[i] = Math.floor(rnd() * 3) - 1;
                         }
+
                         canvasNoiseCache.set(canvas, noisePattern);
                     }
-                    // Применяем шум ко всем байтам
+
                     for (let i = 0; i < data.length; i++) {
+                        // Не изменяем альфа-канал
+                        if (i % 4 === 3) continue;
+
                         const noise = noisePattern[i % 256];
+
                         if (noise !== 0) {
-                            data[i] = Math.min(255, Math.max(0, data[i] + noise));
+                            data[i] = Math.min(
+                                255,
+                                Math.max(0, data[i] + noise)
+                            );
                         }
                     }
                 }
+
                 return imageData;
+            }
+
+            // Защита чтения пикселей Canvas
+            CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+                const imageData = orgGetImageData.call(this, x, y, w, h);
+                return applyCanvasNoise(imageData, this.canvas);
             };
+
             makeNative(CanvasRenderingContext2D.prototype, 'getImageData');
+
+            // Экспорт Canvas в Data URL
             const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+
             HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
                 const ctx = ctx2dMap.get(this);
-                const w = this.width, h = this.height;
+                const w = this.width;
+                const h = this.height;
+
                 if (ctx && w > 0 && h > 0) {
+                    let imageData;
+                    let originalPixels;
+                    let pixelsWritten = false;
+
                     try {
-                        const clean = orgGetImageData.call(ctx, 0, 0, w, h); // Чистая копия
-                        const noisy = ctx.getImageData(0, 0, w, h);          // Наш шумный хук
-                        ctx.putImageData(noisy, 0, 0);
-                        const url = origToDataURL.call(this, type, quality);
-                        ctx.putImageData(clean, 0, 0);                        // ВОССТАНОВЛЕНИЕ
-                        return url;
-                    } catch (e) {}
+                        try {
+                            // Единственное чтение исходных пикселей
+                            imageData = orgGetImageData.call(ctx, 0, 0, w, h);
+
+                            // Сохраняем исходные данные для восстановления
+                            originalPixels = new Uint8ClampedArray(imageData.data);
+
+                            // Применяем шум без повторного чтения Canvas
+                            applyCanvasNoise(imageData, this);
+
+                            ctx.putImageData(imageData, 0, 0);
+                            pixelsWritten = true;
+                        } catch (e) {
+                            return origToDataURL.call(this, type, quality);
+                        }
+
+                        return origToDataURL.call(this, type, quality);
+                    } finally {
+                        // Всегда стараемся вернуть исходные пиксели
+                        if (pixelsWritten && imageData && originalPixels) {
+                            try {
+                                imageData.data.set(originalPixels);
+                                ctx.putImageData(imageData, 0, 0);
+                            } catch (e) {}
+                        }
+                    }
                 }
+
                 return origToDataURL.call(this, type, quality);
             };
+
             makeNative(HTMLCanvasElement.prototype, 'toDataURL');
 
+            // Экспорт Canvas в Blob
             const origToBlob = HTMLCanvasElement.prototype.toBlob;
+
             HTMLCanvasElement.prototype.toBlob = function(callback, type, quality) {
                 const ctx = ctx2dMap.get(this);
-                const w = this.width, h = this.height;
+                const w = this.width;
+                const h = this.height;
+
                 if (ctx && w > 0 && h > 0) {
+                    let imageData;
+                    let originalPixels;
+                    let pixelsWritten = false;
+
                     try {
-                        const clean = orgGetImageData.call(ctx, 0, 0, w, h);
-                        const noisy = ctx.getImageData(0, 0, w, h);
-                        ctx.putImageData(noisy, 0, 0);
-                        const result = origToBlob.call(this, callback, type, quality);
-                        ctx.putImageData(clean, 0, 0);
-                        return result;
-                    } catch (e) {}
+                        try {
+                            // Единственное чтение исходных пикселей
+                            imageData = orgGetImageData.call(ctx, 0, 0, w, h);
+
+                            // Сохраняем исходные данные для восстановления
+                            originalPixels = new Uint8ClampedArray(imageData.data);
+
+                            // Применяем шум без повторного чтения Canvas
+                            applyCanvasNoise(imageData, this);
+
+                            ctx.putImageData(imageData, 0, 0);
+                            pixelsWritten = true;
+                        } catch (e) {
+                            return origToBlob.call(this, callback, type, quality);
+                        }
+
+                        return origToBlob.call(this, callback, type, quality);
+                    } finally {
+                        // Всегда стараемся вернуть исходные пиксели
+                        if (pixelsWritten && imageData && originalPixels) {
+                            try {
+                                imageData.data.set(originalPixels);
+                                ctx.putImageData(imageData, 0, 0);
+                            } catch (e) {}
+                        }
+                    }
                 }
+
                 return origToBlob.call(this, callback, type, quality);
             };
+
             makeNative(HTMLCanvasElement.prototype, 'toBlob');
         }
 
@@ -1552,18 +2886,18 @@
 
     // ========================== ИНТЕРФЕЙС В SHADOW DOM ==========================
     function createUI() {
-        if (document.getElementById('privacy-monitor-shadow-host')) return;
+        if (uiHost && uiHost.isConnected) return;
         if (!document.body) {
             setTimeout(createUI, 100);
             return;
         }
 
         const host = document.createElement('div');
-        host.id = 'privacy-monitor-shadow-host';
         host.style.cssText = 'all: initial; display: block;';
         document.body.appendChild(host);
+        uiHost = host;
 
-        const shadow = host.attachShadow({ mode: 'open' });
+        const shadow = host.attachShadow({ mode: 'closed' });
         uiShadow = shadow;
 
         // Объявляем все переменные состояния в самом начале функции, чтобы не было конфликтов
@@ -1735,7 +3069,7 @@
 
             /* Сама отметка (символ ✓) */
             .pm-chk-label input[type="checkbox"]::after {
-                content: '✓';
+                content: '⊘';
                 position: absolute;
                 top: 0;
                 left: 0;
@@ -1783,12 +3117,27 @@
                 <div id="pm-log-list" style="overflow-y: auto; margin-bottom: 10px;"></div>
                 <!-- НОВАЯ ПАНЕЛЬ УПРАВЛЕНИЯ -->
                 <div style="display: flex; gap: 8px; align-items: center; justify-content: space-between;">
-                    <!-- Левая часть: Чекбокс отключения звука -->
-                    <div style="display: flex; gap: 8px;">
-                        <label class="pm-chk-label pm-has-tooltip" data-tooltip="Полностью отключить все звуки уведомлений и звонков">
+                    <!-- Левая часть: настройки приватности и звука -->
+                    <div style="display: flex; gap: 12px; align-items: center;">
+
+                        <label class="pm-chk-label pm-has-tooltip"
+                               data-tooltip="Собеседники не увидят, что вы прочитали их сообщения">
+                            <input type="checkbox" id="pm-chk-read">
+                            Прочитано
+                        </label>
+
+                        <label class="pm-chk-label pm-has-tooltip"
+                               data-tooltip="Собеседники не увидят, когда вы набираете сообщение">
+                            <input type="checkbox" id="pm-chk-typing">
+                            Печатаю
+                        </label>
+
+                        <label class="pm-chk-label pm-has-tooltip"
+                               data-tooltip="Полностью отключить все звуки уведомлений и звонков">
                             <input type="checkbox" id="pm-chk-mute">
                             Без звука
                         </label>
+
                     </div>
 
                     <!-- Правая часть: Меню -->
@@ -1828,16 +3177,27 @@
             main._offsetX = offsetX;
             main._offsetY = offsetY;
 
-            try {
-                localStorage.setItem('pm_window_anchor_x', main._isLeft ? 'left' : 'right');
-                localStorage.setItem('pm_window_anchor_y', main._isTop ? 'top' : 'bottom');
-                localStorage.setItem('pm_window_offset_x_px', String(offsetX));
-                localStorage.setItem('pm_window_offset_y_px', String(offsetY));
+            setStoredSetting(
+                'pm_window_anchor_x',
+                main._isLeft ? 'left' : 'right'
+            );
+            setStoredSetting(
+                'pm_window_anchor_y',
+                main._isTop ? 'top' : 'bottom'
+            );
+            setStoredSetting('pm_window_offset_x_px', offsetX);
+            setStoredSetting('pm_window_offset_y_px', offsetY);
 
-                // Для совместимости при откате на старую версию.
-                localStorage.setItem('pm_window_left_pct', String((rect.left / window.innerWidth) * 100));
-                localStorage.setItem('pm_window_top_pct', String((rect.top / window.innerHeight) * 100));
-            } catch (err) {}
+            // Сохраняем проценты для совместимости со старой логикой
+            // восстановления положения окна.
+            setStoredSetting(
+                'pm_window_left_pct',
+                (rect.left / window.innerWidth) * 100
+            );
+            setStoredSetting(
+                'pm_window_top_pct',
+                (rect.top / window.innerHeight) * 100
+            );
         }
 
         // ===== ЗАЩИТА ОТ ВЫХОДА ОКНА ЗА ГРАНИЦЫ VIEWPORT =====
@@ -1918,15 +3278,18 @@
             main._offsetY = viewportSafetyGap;
             return true;
         }
-        // ========================================================
 
         // ===== ЛОГИКА ПЕРЕТАСКИВАНИЯ ОКНА =====
-        const savedLeftPct = localStorage.getItem('pm_window_left_pct');
-        const savedTopPct = localStorage.getItem('pm_window_top_pct');
-        const savedAnchorX = localStorage.getItem('pm_window_anchor_x');
-        const savedAnchorY = localStorage.getItem('pm_window_anchor_y');
-        const savedOffsetX = parseFloat(localStorage.getItem('pm_window_offset_x_px'));
-        const savedOffsetY = parseFloat(localStorage.getItem('pm_window_offset_y_px'));
+        const savedLeftPct = getStoredSetting('pm_window_left_pct');
+        const savedTopPct = getStoredSetting('pm_window_top_pct');
+        const savedAnchorX = getStoredSetting('pm_window_anchor_x');
+        const savedAnchorY = getStoredSetting('pm_window_anchor_y');
+        const savedOffsetX = parseFloat(
+            getStoredSetting('pm_window_offset_x_px')
+        );
+        const savedOffsetY = parseFloat(
+            getStoredSetting('pm_window_offset_y_px')
+        );
         const hasPixelPosition =
             (savedAnchorX === 'left' || savedAnchorX === 'right') &&
             (savedAnchorY === 'top' || savedAnchorY === 'bottom') &&
@@ -2077,7 +3440,7 @@
             main._lastViewportWidth = currentWidth;
             main._lastViewportHeight = currentHeight;
         });
-        // ======================================================
+
         // ===== ВЫСЧИТЫВАЕМ ВЫСОТУ РОВНО ДЛЯ 3 СТРОК =====
         const tempEntry = document.createElement('div');
         // Применяем те же стили, что и у обычной строки лога
@@ -2179,8 +3542,8 @@
             const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
             const safeDateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
 
-            const header = `MAX Blinder v2.02\n— Журнал блокировок ${dateStr} —\n\n` + fullLogHistory.join('\n');
-            const filename = `MAX Blinder v2.02 — Журнал блокировок ${safeDateStr}.txt`;
+            const header = `MAX Blinder v2.03\n— Журнал блокировок ${dateStr} —\n\n` + fullLogHistory.join('\n');
+            const filename = `MAX Blinder v2.03 — Журнал блокировок ${safeDateStr}.txt`;
 
             const blob = new Blob([header], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);
@@ -2227,7 +3590,6 @@
                 }
             }
         });
-        // =====================================
 
         // ===== ЛОГИКА ИЗМЕНЕНИЯ РАЗМЕРА ОКНА =====
         const resizeHandleBottom = main.querySelector('#pm-resize-handle-bottom');
@@ -2325,6 +3687,37 @@
                 saveWindowPosition();
             }
         });
+        // ===== ОБРАБОТЧИК ЧЕКБОКСА "ПЕЧАТАЮ" =====
+        const chkTyping = main.querySelector('#pm-chk-typing');
+
+        if (chkTyping) {
+            // Восстанавливаем сохранённое состояние
+            chkTyping.checked = CONFIG.HIDE_TYPING === true;
+
+            chkTyping.addEventListener('change', (e) => {
+                CONFIG.HIDE_TYPING = e.target.checked;
+
+                setStoredSetting(
+                    'pm_hide_typing',
+                    e.target.checked ? 'true' : 'false'
+                );
+            });
+        }
+        // ===== ОБРАБОТЧИК ЧЕКБОКСА "ПРОЧИТАНО" =====
+        const chkRead = main.querySelector('#pm-chk-read');
+
+        if (chkRead) {
+            chkRead.checked = CONFIG.HIDE_READ_RECEIPTS === true;
+
+            chkRead.addEventListener('change', (e) => {
+                CONFIG.HIDE_READ_RECEIPTS = e.target.checked;
+
+                setStoredSetting(
+                    'pm_hide_read_receipts',
+                    e.target.checked ? 'true' : 'false'
+                );
+            });
+        }
         // ===== ОБРАБОТЧИК ЧЕКБОКСА "БЕЗ ЗВУКА" =====
         const chkMute = main.querySelector('#pm-chk-mute');
         if (chkMute) {
@@ -2332,17 +3725,14 @@
             chkMute.checked = (CONFIG.MUTE_SOUNDS === true);
             chkMute.addEventListener('change', (e) => {
                 CONFIG.MUTE_SOUNDS = e.target.checked;
-                try {
-                    // Сохраняем СТРОГО как строку
-                    localStorage.setItem('pm_mute_sounds', e.target.checked ? 'true' : 'false');
-                } catch(err) {
-                    console.warn('Не удалось сохранить настройку звука', err);
-                }
+                setStoredSetting(
+                    'pm_mute_sounds',
+                    e.target.checked ? 'true' : 'false'
+                );
                 // Перезагружаем страницу, чтобы применить настройку
                 location.reload();
             });
         }
-        // =================================================================
 
         // Сворачивание окна при клике вне его
         document.addEventListener('click', (e) => {
@@ -2411,7 +3801,7 @@
         setTimeout(createUI, 500);
     }
     setInterval(() => {
-        if (!document.getElementById('privacy-monitor-shadow-host') && document.body) {
+        if ((!uiHost || !uiHost.isConnected) && document.body) {
             createUI();
         }
     }, 2000);
